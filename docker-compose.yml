@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: attendance-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: attendance
+      POSTGRES_PASSWORD: attendance_password
+      POSTGRES_DB: attendance_db
+
+    ports:
+      - "5434:5432"
+
+    volumes:
+      - attendance_postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U attendance -d attendance_db"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  attendance_postgres_data:

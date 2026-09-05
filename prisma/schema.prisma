@@ -1,0 +1,110 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  ADMIN
+  EMPLOYEE
+}
+
+enum AttendanceStatus {
+  OPEN
+  COMPLETED
+  MANUAL
+}
+
+model User {
+  id           String     @id @default(cuid())
+  username     String     @unique
+  passwordHash String
+  firstName    String
+  lastName     String
+  phone        String?
+  role         UserRole   @default(EMPLOYEE)
+  isActive     Boolean    @default(true)
+
+  attendances  Attendance[]
+  sessions     Session[]
+
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([role])
+  @@index([isActive])
+}
+
+model Attendance {
+  id          String           @id @default(cuid())
+
+  userId      String
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  workDate    DateTime
+
+  checkIn     DateTime?
+  checkOut    DateTime?
+
+  status      AttendanceStatus @default(OPEN)
+
+  note        String?
+
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@unique([userId, workDate])
+  @@index([userId])
+  @@index([workDate])
+  @@index([status])
+}
+
+model Session {
+  id         String   @id @default(cuid())
+
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash  String   @unique
+
+  expiresAt  DateTime
+
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model CompanySettings {
+  id                String   @id @default("company")
+
+  workStartMinutes  Int      @default(510)
+  workEndMinutes    Int      @default(1020)
+
+  saturday          Boolean  @default(true)
+  sunday            Boolean  @default(true)
+  monday            Boolean  @default(true)
+  tuesday           Boolean  @default(true)
+  wednesday         Boolean  @default(true)
+  thursday          Boolean  @default(true)
+  friday            Boolean  @default(false)
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model Holiday {
+  id          String   @id @default(cuid())
+
+  date        DateTime @unique
+  title       String
+  description String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([date])
+}
