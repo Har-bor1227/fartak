@@ -6,9 +6,7 @@ import {
   Loader2,
   Save,
 } from "lucide-react";
-import {
-  useActionState,
-} from "react";
+import { useActionState } from "react";
 
 import {
   saveWorkSchedule,
@@ -18,7 +16,6 @@ import {
 type WorkScheduleFormProps = {
   workStart: string;
   workEnd: string;
-
   saturday: boolean;
   sunday: boolean;
   monday: boolean;
@@ -107,66 +104,45 @@ export default function WorkScheduleForm({
   };
 
   return (
-    <form action={formAction}>
-      <div className="grid gap-5 md:grid-cols-2">
-        <div>
-          <label
-            htmlFor="work-start"
-            className="mb-2 block text-xs font-semibold text-slate-600"
-          >
-            ساعت شروع کار
-          </label>
+    <form
+      action={formAction}
+      className="space-y-6"
+    >
+      <div>
+        <div className="mb-3">
+          <p className="text-xs font-bold text-slate-700">
+            ساعات کاری
+          </p>
 
-          <div className="relative">
-            <Clock3
-              size={17}
-              className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-slate-400"
-            />
-
-            <input
-              id="work-start"
-              name="workStart"
-              type="time"
-              defaultValue={workStart}
-              required
-              className="h-12 w-full rounded-2xl border border-slate-200 bg-slate-50 pr-11 pl-4 text-sm font-medium text-slate-900 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-4 focus:ring-slate-900/5"
-            />
-          </div>
+          <p className="mt-1 text-[11px] leading-5 text-slate-400">
+            زمان شروع و پایان برنامه معمول شرکت را مشخص کنید.
+          </p>
         </div>
 
-        <div>
-          <label
-            htmlFor="work-end"
-            className="mb-2 block text-xs font-semibold text-slate-600"
-          >
-            ساعت پایان کار
-          </label>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <TimeField
+            id="work-start"
+            name="workStart"
+            label="ساعت شروع کار"
+            value={workStart}
+          />
 
-          <div className="relative">
-            <Clock3
-              size={17}
-              className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-slate-400"
-            />
-
-            <input
-              id="work-end"
-              name="workEnd"
-              type="time"
-              defaultValue={workEnd}
-              required
-              className="h-12 w-full rounded-2xl border border-slate-200 bg-slate-50 pr-11 pl-4 text-sm font-medium text-slate-900 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-4 focus:ring-slate-900/5"
-            />
-          </div>
+          <TimeField
+            id="work-end"
+            name="workEnd"
+            label="ساعت پایان کار"
+            value={workEnd}
+          />
         </div>
       </div>
 
-      <div className="mt-6">
+      <div>
         <div className="mb-3">
-          <p className="text-xs font-semibold text-slate-700">
+          <p className="text-xs font-bold text-slate-700">
             روزهای کاری
           </p>
 
-          <p className="mt-1 text-[11px] text-slate-400">
+          <p className="mt-1 text-[11px] leading-5 text-slate-400">
             روزهایی که شرکت به‌صورت معمول فعال است را انتخاب کنید.
           </p>
         </div>
@@ -179,11 +155,23 @@ export default function WorkScheduleForm({
             return (
               <label
                 key={day.name}
-                className={
-                  checked
-                    ? "flex cursor-pointer items-center gap-3 rounded-2xl border border-slate-900 bg-slate-950 p-3 text-white transition"
-                    : "flex cursor-pointer items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-slate-600 transition hover:bg-white"
-                }
+                className={`
+                  group
+                  flex
+                  min-h-12
+                  cursor-pointer
+                  items-center
+                  gap-3
+                  rounded-2xl
+                  border
+                  p-3
+                  transition
+                  ${
+                    checked
+                      ? "border-slate-900 bg-slate-950 text-white shadow-[0_6px_18px_rgba(15,23,42,0.10)]"
+                      : "border-slate-200 bg-slate-50 text-slate-600 hover:border-slate-300 hover:bg-white"
+                  }
+                `}
               >
                 <input
                   type="checkbox"
@@ -193,11 +181,21 @@ export default function WorkScheduleForm({
                 />
 
                 <span
-                  className={
-                    checked
-                      ? "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-white/15"
-                      : "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-white"
-                  }
+                  className={`
+                    flex
+                    h-7
+                    w-7
+                    shrink-0
+                    items-center
+                    justify-center
+                    rounded-lg
+                    transition
+                    ${
+                      checked
+                        ? "bg-white/15 text-white"
+                        : "border border-slate-200 bg-white text-transparent group-hover:border-slate-300"
+                    }
+                  `}
                 >
                   {checked ? (
                     <Check
@@ -219,11 +217,19 @@ export default function WorkScheduleForm({
       {state.message ? (
         <div
           role="status"
-          className={
-            state.success
-              ? "mt-5 rounded-2xl bg-emerald-50 px-4 py-3 text-xs leading-5 text-emerald-700"
-              : "mt-5 rounded-2xl bg-red-50 px-4 py-3 text-xs leading-5 text-red-700"
-          }
+          className={`
+            rounded-2xl
+            border
+            px-4
+            py-3
+            text-xs
+            leading-5
+            ${
+              state.success
+                ? "border-emerald-100 bg-emerald-50 text-emerald-700"
+                : "border-red-100 bg-red-50 text-red-700"
+            }
+          `}
         >
           {state.message}
         </div>
@@ -232,7 +238,26 @@ export default function WorkScheduleForm({
       <button
         type="submit"
         disabled={pending}
-        className="mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-slate-950 text-sm font-semibold text-white shadow-lg shadow-slate-950/10 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+        className="
+          flex
+          h-12
+          w-full
+          items-center
+          justify-center
+          gap-2
+          rounded-2xl
+          bg-slate-950
+          px-4
+          text-sm
+          font-semibold
+          text-white
+          shadow-[0_10px_25px_rgba(15,23,42,0.12)]
+          transition
+          hover:bg-slate-800
+          active:scale-[0.99]
+          disabled:cursor-not-allowed
+          disabled:opacity-60
+        "
       >
         {pending ? (
           <>
@@ -250,5 +275,70 @@ export default function WorkScheduleForm({
         )}
       </button>
     </form>
+  );
+}
+
+function TimeField({
+  id,
+  name,
+  label,
+  value,
+}: {
+  id: string;
+  name: string;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div>
+      <label
+        htmlFor={id}
+        className="mb-2 block text-xs font-semibold text-slate-600"
+      >
+        {label}
+      </label>
+
+      <div className="relative">
+        <Clock3
+          size={17}
+          className="
+            pointer-events-none
+            absolute
+            right-4
+            top-1/2
+            -translate-y-1/2
+            text-slate-400
+          "
+        />
+
+        <input
+          id={id}
+          name={name}
+          type="time"
+          defaultValue={value}
+          required
+          className="
+            h-12
+            w-full
+            rounded-2xl
+            border
+            border-slate-200
+            bg-slate-50
+            pr-11
+            pl-4
+            text-sm
+            font-medium
+            text-slate-900
+            outline-none
+            transition
+            hover:border-slate-300
+            focus:border-slate-400
+            focus:bg-white
+            focus:ring-4
+            focus:ring-slate-900/5
+          "
+        />
+      </div>
+    </div>
   );
 }

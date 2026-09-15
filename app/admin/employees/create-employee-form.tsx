@@ -29,19 +29,21 @@ export default function CreateEmployeeForm() {
       action={formAction}
       className="mt-6 space-y-4"
     >
-      <FormField
-        label="نام"
-        name="firstName"
-        placeholder="مثلاً علی"
-        required
-      />
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
+        <FormField
+          label="نام"
+          name="firstName"
+          placeholder="مثلاً علی"
+          required
+        />
 
-      <FormField
-        label="نام خانوادگی"
-        name="lastName"
-        placeholder="مثلاً رضایی"
-        required
-      />
+        <FormField
+          label="نام خانوادگی"
+          name="lastName"
+          placeholder="مثلاً رضایی"
+          required
+        />
+      </div>
 
       <FormField
         label="نام کاربری"
@@ -70,11 +72,19 @@ export default function CreateEmployeeForm() {
       {state.message ? (
         <div
           role="alert"
-          className={`flex items-start gap-2 rounded-2xl px-3.5 py-3 text-xs leading-5 ${
-            state.success
-              ? "bg-emerald-50 text-emerald-700"
-              : "bg-red-50 text-red-700"
-          }`}
+          className={`
+            flex items-start gap-2
+            rounded-2xl
+            border
+            px-3.5 py-3
+            text-xs
+            leading-5
+            ${
+              state.success
+                ? "border-emerald-100 bg-emerald-50 text-emerald-700"
+                : "border-red-100 bg-red-50 text-red-700"
+            }
+          `}
         >
           {state.success ? (
             <CheckCircle2
@@ -96,11 +106,22 @@ export default function CreateEmployeeForm() {
         type="submit"
         disabled={pending}
         className="
-          flex h-12 w-full items-center justify-center
-          gap-2 rounded-2xl bg-slate-950
-          text-sm font-semibold text-white
-          shadow-lg shadow-slate-950/10
-          transition hover:bg-slate-800
+          flex
+          h-12
+          w-full
+          items-center
+          justify-center
+          gap-2
+          rounded-2xl
+          bg-slate-950
+          px-4
+          text-sm
+          font-semibold
+          text-white
+          shadow-[0_10px_25px_rgba(15,23,42,0.12)]
+          transition
+          hover:bg-slate-800
+          active:scale-[0.99]
           disabled:cursor-not-allowed
           disabled:opacity-60
         "
@@ -139,11 +160,18 @@ function FormField({
   dir?: "ltr" | "rtl";
   required?: boolean;
 }) {
+  const autoComplete =
+    name === "password"
+      ? "new-password"
+      : name === "username"
+        ? "username"
+        : "off";
+
   return (
     <div>
       <label
         htmlFor={`employee-${name}`}
-        className="mb-2 block text-xs font-semibold text-slate-600"
+        className="mb-2 flex items-center text-xs font-semibold text-slate-600"
       >
         {label}
 
@@ -159,18 +187,21 @@ function FormField({
         placeholder={placeholder}
         dir={dir}
         required={required}
-        autoComplete={
-          name === "password"
-            ? "new-password"
-            : "off"
-        }
+        autoComplete={autoComplete}
         className="
-          h-12 w-full rounded-2xl
-          border border-slate-200
-          bg-slate-50 px-4
-          text-sm text-slate-900
-          outline-none transition
+          h-12
+          w-full
+          rounded-2xl
+          border
+          border-slate-200
+          bg-slate-50
+          px-4
+          text-sm
+          text-slate-900
+          outline-none
+          transition
           placeholder:text-slate-400
+          hover:border-slate-300
           focus:border-slate-400
           focus:bg-white
           focus:ring-4

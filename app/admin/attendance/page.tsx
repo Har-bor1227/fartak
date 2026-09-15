@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   Clock3,
   MinusCircle,
+  PenLine,
   TriangleAlert,
   UserCheck,
   UserX,
@@ -15,16 +16,26 @@ import {
 
 import AdminShell from "@/components/admin/admin-shell";
 import AttendanceStatus from "@/components/admin/attendance-status";
-import AttendanceFilters from "./attendance-filters";
 
 import { requireAdmin } from "@/lib/auth/current-user";
+
 import {
   calculateAttendanceDay,
   type AttendanceCalculation,
   type AttendanceHoliday,
+  type AttendanceLeave,
   type AttendanceRecord as EngineAttendanceRecord,
   type AttendanceSchedule,
+  type AttendanceTemporaryExit,
 } from "@/lib/attendance/engine";
+
+import {
+  getCompanyScheduleHistory,
+  getDefaultAttendanceSchedule,
+  getEmployeeShiftAssignments,
+  resolveEmployeeSchedule,
+} from "@/lib/attendance/schedule-resolver";
+
 import {
   formatDate,
   formatTime,
@@ -32,7 +43,11 @@ import {
   getDateRange,
   getPersianWeekday,
 } from "@/lib/date/tehran";
+
 import { prisma } from "@/lib/prisma";
+
+import AttendanceFilters from "./attendance-filters";
+import ManualAttendanceDialog from "./manual-attendance-dialog";
 
 type AttendancePageProps = {
   searchParams: Promise<{
@@ -57,6 +72,15 @@ type AttendanceRecord = {
   checkOut: Date | null;
   status: string;
   note: string | null;
+  temporaryExits: AttendanceTemporaryExit[];
+};
+
+type ApprovedLeave = {
+  id: string;
+  userId: string;
+  type: AttendanceLeave["type"];
+  startDate: Date;
+  endDate: Date;
 };
 
 type AttendanceRowData = {
@@ -103,6 +127,9 @@ function getStateText(
     case "ABSENT":
       return "غایب";
 
+    case "LEAVE":
+      return "مرخصی";
+
     case "HOLIDAY":
       return "تعطیل";
 
@@ -129,6 +156,9 @@ function getStateClass(
 
     case "ABSENT":
       return "bg-rose-50 text-rose-700";
+
+    case "LEAVE":
+      return "bg-amber-50 text-amber-700";
 
     case "HOLIDAY":
       return "bg-violet-50 text-violet-700";
@@ -157,6 +187,9 @@ function getStateIcon(
     case "ABSENT":
       return UserX;
 
+    case "LEAVE":
+      return CalendarDays;
+
     case "HOLIDAY":
       return CalendarDays;
 
@@ -171,12 +204,49 @@ function getStateIcon(
   }
 }
 
+function formatInputTime(
+  value: Date | null,
+): string {
+  if (!value) {
+    return "";
+  }
+
+  const parts =
+    new Intl.DateTimeFormat(
+      "en-GB",
+      {
+        timeZone:
+          process.env.APP_TIMEZONE ||
+          "Asia/Tehran",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      },
+    ).formatToParts(value);
+
+  const hour =
+    parts.find(
+      (part) =>
+        part.type === "hour",
+    )?.value ?? "00";
+
+  const minute =
+    parts.find(
+      (part) =>
+        part.type === "minute",
+    )?.value ?? "00";
+
+  return `${hour}:${minute}`;
+}
+
 export default async function AttendancePage({
   searchParams,
 }: AttendancePageProps) {
-  const admin = await requireAdmin();
+  const admin =
+    await requireAdmin();
 
-  const params = await searchParams;
+  const params =
+    await searchParams;
 
   const todayKey =
     getDateKey(new Date());
@@ -188,7 +258,9 @@ export default async function AttendancePage({
       : todayKey;
 
   const selectedRange =
-    getDateRange(requestedDate) ??
+    getDateRange(
+      requestedDate,
+    ) ??
     getDateRange(todayKey);
 
   if (selectedRange === null) {
@@ -202,6 +274,8 @@ export default async function AttendancePage({
     attendances,
     settings,
     holiday,
+    approvedLeaves,
+    companyScheduleHistory,
   ] = await Promise.all([
     prisma.user.findMany({
       where: {
@@ -233,8 +307,10 @@ export default async function AttendancePage({
     prisma.attendance.findMany({
       where: {
         workDate: {
-          gte: selectedRange.start,
-          lt: selectedRange.end,
+          gte:
+            selectedRange.start,
+          lt:
+            selectedRange.end,
         },
 
         user: {
@@ -250,6 +326,19 @@ export default async function AttendancePage({
         checkOut: true,
         status: true,
         note: true,
+
+        temporaryExits: {
+          select: {
+            type: true,
+            status: true,
+            startedAt: true,
+            endedAt: true,
+          },
+
+          orderBy: {
+            startedAt: "asc",
+          },
+        },
       },
     }),
 
@@ -261,24 +350,67 @@ export default async function AttendancePage({
 
     prisma.holiday.findUnique({
       where: {
-        date: selectedRange.start,
+        date:
+          selectedRange.start,
       },
+    }),
+
+    prisma.leave.findMany({
+      where: {
+        status: "APPROVED",
+
+        startDate: {
+          lt:
+            selectedRange.end,
+        },
+
+        endDate: {
+          gte:
+            selectedRange.start,
+        },
+
+        user: {
+          role: "EMPLOYEE",
+        },
+      },
+
+      select: {
+        id: true,
+        userId: true,
+        type: true,
+        startDate: true,
+        endDate: true,
+      },
+    }),
+
+    getCompanyScheduleHistory({
+      from:
+        selectedRange.start,
+      to:
+        selectedRange.end,
     }),
   ]);
 
-  const schedule: AttendanceSchedule =
-    settings ?? {
-      workStartMinutes: 510,
-      workEndMinutes: 1020,
+  const fallbackSchedule:
+    AttendanceSchedule =
+    getDefaultAttendanceSchedule(
+      settings,
+    );
 
-      saturday: true,
-      sunday: true,
-      monday: true,
-      tuesday: true,
-      wednesday: true,
-      thursday: true,
-      friday: false,
-    };
+  const shiftAssignments =
+    await getEmployeeShiftAssignments({
+      userIds:
+        employees.map(
+          (employee) =>
+            employee.id,
+        ),
+
+      from:
+        selectedRange.start,
+
+      to:
+        selectedRange.end,
+    });
 
   const attendanceMap =
     new Map<
@@ -286,28 +418,58 @@ export default async function AttendancePage({
       AttendanceRecord
     >();
 
-  for (const attendance of attendances) {
+  for (
+    const attendance of attendances
+  ) {
     attendanceMap.set(
       attendance.userId,
       attendance,
     );
   }
 
+  const leaveMap =
+    new Map<
+      string,
+      ApprovedLeave
+    >();
+
+  for (
+    const leave of approvedLeaves
+  ) {
+    if (
+      leave.startDate.getTime() <
+        selectedRange.end.getTime() &&
+      leave.endDate.getTime() >=
+        selectedRange.start.getTime()
+    ) {
+      leaveMap.set(
+        leave.userId,
+        leave,
+      );
+    }
+  }
+
   const engineHoliday =
     holiday
       ? ({
-          workDate: holiday.date,
-          title: holiday.title,
+          title:
+            holiday.title,
           description:
             holiday.description,
         } as AttendanceHoliday)
       : null;
 
-  const rows: AttendanceRowData[] =
+  const rows:
+    AttendanceRowData[] =
     employees.map(
       (employee) => {
         const attendance =
           attendanceMap.get(
+            employee.id,
+          ) ?? null;
+
+        const approvedLeave =
+          leaveMap.get(
             employee.id,
           ) ?? null;
 
@@ -316,24 +478,65 @@ export default async function AttendancePage({
             ? ({
                 workDate:
                   attendance.workDate,
+
                 checkIn:
                   attendance.checkIn,
+
                 checkOut:
                   attendance.checkOut,
+
                 status:
                   attendance.status,
+
                 note:
                   attendance.note,
+
+                temporaryExits:
+                  attendance.temporaryExits,
               } as EngineAttendanceRecord)
             : null;
+
+        const engineLeave =
+          approvedLeave
+            ? ({
+                type:
+                  approvedLeave.type,
+              } as AttendanceLeave)
+            : null;
+
+        const employeeSchedule =
+          resolveEmployeeSchedule({
+            assignments:
+              shiftAssignments,
+
+            userId:
+              employee.id,
+
+            workDate:
+              selectedRange.start,
+
+            fallbackSchedule,
+
+            companyScheduleHistory,
+
+            currentCompanySettings:
+              settings,
+          });
 
         const calculation =
           calculateAttendanceDay({
             workDate:
               selectedRange.start,
-            schedule,
+
+            schedule:
+              employeeSchedule,
+
             holiday:
               engineHoliday,
+
+            leave:
+              engineLeave,
+
             attendance:
               engineAttendance,
           });
@@ -358,6 +561,13 @@ export default async function AttendancePage({
       ({ calculation }) =>
         calculation.state ===
         "WORKING",
+    ).length;
+
+  const leaveCount =
+    rows.filter(
+      ({ calculation }) =>
+        calculation.state ===
+        "LEAVE",
     ).length;
 
   const completedCount =
@@ -433,6 +643,18 @@ export default async function AttendancePage({
       0,
     );
 
+  const totalTemporaryExitMinutes =
+    rows.reduce(
+      (
+        total,
+        row,
+      ) =>
+        total +
+        row.calculation
+          .temporaryExitMinutes,
+      0,
+    );
+
   const workedRows =
     rows.filter(
       ({ calculation }) =>
@@ -450,41 +672,65 @@ export default async function AttendancePage({
 
   return (
     <AdminShell
-      firstName={admin.firstName}
-      lastName={admin.lastName}
+      firstName={
+        admin.firstName
+      }
+      lastName={
+        admin.lastName
+      }
     >
       <div
         dir="rtl"
-        className="mx-auto max-w-[1500px] px-4 py-4 sm:px-6 sm:py-6 xl:px-8"
+        className="
+          mx-auto
+          max-w-[1500px]
+          px-4
+          pb-24
+          pt-4
+          sm:px-6
+          sm:pb-8
+          sm:pt-6
+          xl:px-8
+        "
       >
-        <header className="mb-6">
-          <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
+        <header className="mb-5">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div className="min-w-0">
               <div className="mb-3 flex flex-wrap items-center gap-2">
-                <span className="inline-flex h-7 items-center gap-1.5 rounded-full bg-slate-100 px-3 text-[11px] font-semibold text-slate-600">
-                  <Activity size={13} />
+                <span className="inline-flex h-7 items-center gap-1.5 rounded-full bg-slate-100 px-3 text-[10px] font-bold text-slate-600">
+                  <Activity size={12} />
                   مرکز حضور و غیاب
                 </span>
 
-                <span className="inline-flex h-7 items-center rounded-full bg-blue-50 px-3 text-[11px] font-semibold text-blue-700">
+                <span className="inline-flex h-7 items-center rounded-full bg-blue-50 px-3 text-[10px] font-bold text-blue-700">
                   {getPersianWeekday(
                     selectedRange.start,
                   )}
                 </span>
 
                 {holiday ? (
-                  <span className="inline-flex h-7 items-center rounded-full bg-violet-50 px-3 text-[11px] font-semibold text-violet-700">
-                    {holiday.title}
+                  <span className="inline-flex max-w-full items-center rounded-full bg-violet-50 px-3 py-1.5 text-[10px] font-bold text-violet-700">
+                    <span className="truncate">
+                      {holiday.title}
+                    </span>
+                  </span>
+                ) : null}
+
+                {leaveCount >
+                0 ? (
+                  <span className="inline-flex items-center rounded-full bg-amber-50 px-3 py-1.5 text-[10px] font-bold text-amber-700">
+                    {leaveCount} نفر مرخصی
                   </span>
                 ) : null}
               </div>
 
-              <h1 className="text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl">
+              <h1 className="text-[28px] font-bold tracking-tight text-slate-950 sm:text-3xl">
                 حضور و غیاب
               </h1>
 
               <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
-                وضعیت کارکنان بر اساس برنامه کاری، تعطیلات و رکورد واقعی حضور محاسبه می‌شود.
+                وضعیت حضور کارکنان را بررسی کنید یا رکوردهای موردنیاز
+                را به‌صورت دستی اصلاح کنید.
               </p>
             </div>
 
@@ -496,24 +742,53 @@ export default async function AttendancePage({
 
         <section className="mb-4 rounded-[24px] border border-slate-200/80 bg-white p-4 shadow-[0_8px_30px_rgba(15,23,42,0.03)] sm:p-5">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="min-w-0">
-              <p className="text-xs font-medium text-slate-400">
-                گزارش روز
-              </p>
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-slate-950 text-white">
+                <CalendarDays size={19} />
+              </div>
 
-              <p className="mt-1 truncate text-base font-bold text-slate-950">
-                {formatDate(
-                  selectedRange.start,
-                )}
-              </p>
+              <div className="min-w-0">
+                <p className="text-[10px] font-medium text-slate-400">
+                  تاریخ انتخاب‌شده
+                </p>
+
+                <p className="mt-1 truncate text-sm font-bold text-slate-950">
+                  {formatDate(
+                    selectedRange.start,
+                  )}
+                </p>
+              </div>
             </div>
 
-            <Link
-              href="/admin/attendance"
-              className="inline-flex h-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 px-4 text-xs font-semibold text-slate-600 transition hover:bg-slate-200"
-            >
-              امروز
-            </Link>
+            <div className="flex flex-wrap gap-2">
+              <span className="inline-flex items-center gap-1.5 rounded-xl bg-violet-50 px-3 py-2 text-[10px] font-semibold text-violet-700">
+                <PenLine size={13} />
+                امکان ثبت دستی
+              </span>
+
+              <Link
+                href="/admin/attendance"
+                className="
+                  inline-flex
+                  h-10
+                  shrink-0
+                  items-center
+                  justify-center
+                  rounded-xl
+                  bg-slate-950
+                  px-4
+                  text-[11px]
+                  font-semibold
+                  text-white
+                  shadow-lg
+                  shadow-slate-950/10
+                  transition
+                  hover:bg-slate-800
+                "
+              >
+                امروز
+              </Link>
+            </div>
           </div>
         </section>
 
@@ -528,37 +803,47 @@ export default async function AttendancePage({
 
           <StatCard
             title="حاضر"
-            value={presentCount}
+            value={
+              presentCount
+            }
             icon={UserCheck}
             valueClass="text-emerald-600"
           />
 
           <StatCard
             title="داخل شرکت"
-            value={workingCount}
+            value={
+              workingCount
+            }
             icon={Activity}
             valueClass="text-blue-600"
           />
 
           <StatCard
+            title="مرخصی"
+            value={
+              leaveCount
+            }
+            icon={CalendarDays}
+            valueClass="text-amber-600"
+          />
+
+          <StatCard
             title="غایب"
-            value={absentCount}
+            value={
+              absentCount
+            }
             icon={UserX}
             valueClass="text-rose-600"
           />
 
           <StatCard
             title="تعطیل"
-            value={holidayCount}
+            value={
+              holidayCount
+            }
             icon={CalendarDays}
             valueClass="text-violet-600"
-          />
-
-          <StatCard
-            title="غیرکاری"
-            value={nonWorkingCount}
-            icon={MinusCircle}
-            valueClass="text-slate-500"
           />
 
           <div className="col-span-2 sm:col-span-1">
@@ -577,10 +862,12 @@ export default async function AttendancePage({
           </div>
         </section>
 
-        <section className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+        <section className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-7">
           <StatCard
             title="رکوردهای کامل"
-            value={completedCount}
+            value={
+              completedCount
+            }
             icon={CheckCircle2}
             valueClass="text-emerald-600"
           />
@@ -596,6 +883,25 @@ export default async function AttendancePage({
                 : "—"
             }
             icon={Clock3}
+          />
+
+          <StatCard
+            title="مجموع خروج موقت"
+            value={
+              totalTemporaryExitMinutes >
+              0
+                ? formatMinutes(
+                    totalTemporaryExitMinutes,
+                  )
+                : "۰ دقیقه"
+            }
+            icon={Clock3}
+            valueClass={
+              totalTemporaryExitMinutes >
+              0
+                ? "text-amber-600"
+                : "text-slate-950"
+            }
           />
 
           <StatCard
@@ -633,7 +939,9 @@ export default async function AttendancePage({
 
           <StatCard
             title="آینده"
-            value={futureCount}
+            value={
+              futureCount
+            }
             icon={Clock3}
             valueClass="text-amber-600"
           />
@@ -654,52 +962,68 @@ export default async function AttendancePage({
           />
         </section>
 
-        <section className="mt-4 overflow-hidden rounded-[26px] border border-slate-200/80 bg-white shadow-[0_8px_30px_rgba(15,23,42,0.04)]">
-          <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-            <div>
-              <h2 className="text-base font-bold text-slate-950">
-                وضعیت کارکنان
-              </h2>
+        <section className="mt-4 overflow-hidden rounded-[28px] border border-slate-200/80 bg-white shadow-[0_10px_35px_rgba(15,23,42,0.04)]">
+          <div className="border-b border-slate-100 px-5 py-5 sm:px-6">
+            <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-50 text-slate-500">
+                    <Users size={17} />
+                  </div>
 
-              <p className="mt-1 text-xs text-slate-400">
-                {formatDate(
-                  selectedRange.start,
-                )}
-              </p>
-            </div>
+                  <h2 className="text-base font-bold text-slate-950">
+                    وضعیت کارکنان
+                  </h2>
+                </div>
 
-            <div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold">
-              <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-emerald-700">
-                {presentCount} حاضر
-              </span>
+                <p className="mt-2 text-xs text-slate-400">
+                  {formatDate(
+                    selectedRange.start,
+                  )}
+                </p>
+              </div>
 
-              <span className="rounded-full bg-blue-50 px-3 py-1.5 text-blue-700">
-                {workingCount} داخل شرکت
-              </span>
-
-              <span className="rounded-full bg-rose-50 px-3 py-1.5 text-rose-700">
-                {absentCount} غایب
-              </span>
-
-              {holidayCount > 0 ? (
-                <span className="rounded-full bg-violet-50 px-3 py-1.5 text-violet-700">
-                  {holidayCount} تعطیل
+              <div className="flex flex-wrap items-center gap-2 text-[10px] font-semibold">
+                <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-emerald-700">
+                  {presentCount} حاضر
                 </span>
-              ) : null}
+
+                <span className="rounded-full bg-blue-50 px-3 py-1.5 text-blue-700">
+                  {workingCount} داخل شرکت
+                </span>
+
+                <span className="rounded-full bg-amber-50 px-3 py-1.5 text-amber-700">
+                  {leaveCount} مرخصی
+                </span>
+
+                <span className="rounded-full bg-rose-50 px-3 py-1.5 text-rose-700">
+                  {absentCount} غایب
+                </span>
+
+                {holidayCount >
+                0 ? (
+                  <span className="rounded-full bg-violet-50 px-3 py-1.5 text-violet-700">
+                    {holidayCount} تعطیل
+                  </span>
+                ) : null}
+              </div>
             </div>
           </div>
 
-          {rows.length === 0 ? (
+          {rows.length ===
+          0 ? (
             <EmptyState />
           ) : (
             <>
-              <div className="hidden border-b border-slate-100 bg-slate-50/60 px-6 py-3 text-[11px] font-semibold text-slate-400 md:grid md:grid-cols-[minmax(240px,1.5fr)_120px_120px_170px_140px_24px] md:items-center md:gap-4">
+              <div className="hidden border-b border-slate-100 bg-slate-50/60 px-6 py-3 text-[10px] font-semibold text-slate-400 md:grid md:grid-cols-[minmax(230px,1.5fr)_110px_110px_160px_125px_180px] md:items-center md:gap-4">
                 <span>کارمند</span>
                 <span>ورود</span>
                 <span>خروج</span>
                 <span>کارکرد</span>
                 <span>وضعیت</span>
-                <span />
+                <span className="text-left">
+                  عملیات
+                </span>
               </div>
 
               <div className="divide-y divide-slate-100">
@@ -718,6 +1042,9 @@ export default async function AttendancePage({
                       calculation={
                         row.calculation
                       }
+                      dateKey={
+                        requestedDate
+                      }
                     />
                   ),
                 )}
@@ -734,10 +1061,12 @@ function AttendanceRow({
   employee,
   attendance,
   calculation,
+  dateKey,
 }: {
   employee: Employee;
   attendance: AttendanceRecord | null;
   calculation: AttendanceCalculation;
+  dateKey: string;
 }) {
   const StateIcon =
     getStateIcon(
@@ -745,28 +1074,33 @@ function AttendanceRow({
     );
 
   return (
-    <Link
-      href={`/admin/attendance/${employee.id}`}
-      className="group block px-4 py-4 transition hover:bg-slate-50/70 sm:px-5"
-    >
-      <div className="grid gap-3 md:grid-cols-[minmax(240px,1.5fr)_120px_120px_170px_140px_24px] md:items-center md:gap-4">
-        <div className="flex min-w-0 items-center gap-3">
+    <div className="px-4 py-4 transition hover:bg-slate-50/50 sm:px-5">
+      <div className="grid gap-3 md:grid-cols-[minmax(230px,1.5fr)_110px_110px_160px_125px_180px] md:items-center md:gap-4">
+        <Link
+          href={`/admin/attendance/${employee.id}`}
+          className="group flex min-w-0 items-center gap-3"
+        >
           <div
             className={
               employee.isActive
-                ? "flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-slate-950 text-xs font-bold text-white"
-                : "flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-xs font-bold text-slate-400"
+                ? "relative flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-slate-950 text-xs font-bold text-white"
+                : "relative flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-xs font-bold text-slate-400"
             }
           >
             {employee.firstName?.[0] ??
               ""}
             {employee.lastName?.[0] ??
               ""}
+
+            {calculation.state ===
+            "WORKING" ? (
+              <span className="absolute -bottom-0.5 -left-0.5 h-2.5 w-2.5 rounded-full border-2 border-white bg-emerald-500" />
+            ) : null}
           </div>
 
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
-              <p className="truncate text-sm font-bold text-slate-900">
+              <p className="truncate text-sm font-bold text-slate-900 group-hover:text-slate-700">
                 {employee.firstName}{" "}
                 {employee.lastName}
               </p>
@@ -778,11 +1112,26 @@ function AttendanceRow({
               ) : null}
             </div>
 
-            <p className="mt-1 truncate text-xs text-slate-400">
-              @{employee.username}
-            </p>
+            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <p className="truncate text-[10px] text-slate-400">
+                @{employee.username}
+              </p>
+
+              <span className="hidden text-[10px] text-slate-300 sm:inline">
+                •
+              </span>
+
+              <p className="text-[10px] text-slate-400">
+                ورود{" "}
+                <span className="font-semibold text-slate-600">
+                  {formatTime(
+                    calculation.checkIn,
+                  )}
+                </span>
+              </p>
+            </div>
           </div>
-        </div>
+        </Link>
 
         <div className="hidden md:block">
           <p className="text-[10px] text-slate-400">
@@ -819,6 +1168,16 @@ function AttendanceRow({
             )}
           </p>
 
+          {calculation.temporaryExitMinutes >
+          0 ? (
+            <p className="mt-1 text-[10px] text-amber-600">
+              خروج موقت:{" "}
+              {formatMinutes(
+                calculation.temporaryExitMinutes,
+              )}
+            </p>
+          ) : null}
+
           {calculation.lateMinutes >
           0 ? (
             <p className="mt-1 text-[10px] text-amber-600">
@@ -829,8 +1188,7 @@ function AttendanceRow({
             </p>
           ) : null}
 
-          {calculation
-            .earlyLeaveMinutes >
+          {calculation.earlyLeaveMinutes >
           0 ? (
             <p className="mt-1 text-[10px] text-rose-600">
               تعجیل:{" "}
@@ -841,9 +1199,9 @@ function AttendanceRow({
           ) : null}
         </div>
 
-        <div className="flex items-center justify-between gap-3">
-          <div className="md:hidden">
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-400">
+        <div className="flex min-w-0 items-center justify-between gap-3">
+          <div className="min-w-0 md:hidden">
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-slate-400">
               <span>
                 ورود{" "}
                 <b className="font-semibold text-slate-700">
@@ -872,6 +1230,18 @@ function AttendanceRow({
               </span>
             </p>
 
+            {calculation.temporaryExitMinutes >
+            0 ? (
+              <p className="mt-1 text-[10px] text-amber-600">
+                خروج موقت{" "}
+                <span className="font-semibold">
+                  {formatMinutes(
+                    calculation.temporaryExitMinutes,
+                  )}
+                </span>
+              </p>
+            ) : null}
+
             {calculation.lateMinutes >
             0 ? (
               <p className="mt-1 text-[10px] text-amber-600">
@@ -885,20 +1255,26 @@ function AttendanceRow({
             ) : null}
           </div>
 
-          <div className="mr-auto flex items-center gap-2 md:mr-0">
+          <div className="mr-auto flex shrink-0 items-center gap-2 md:mr-0">
             <span
-              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-semibold ${getStateClass(
+              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[9px] font-semibold sm:px-3 sm:text-[10px] ${getStateClass(
                 calculation.state,
               )}`}
             >
-              <StateIcon
-                size={12}
-              />
+              <StateIcon size={11} />
 
               {getStateText(
                 calculation.state,
               )}
             </span>
+
+            {attendance?.status ===
+            "MANUAL" ? (
+              <span className="hidden items-center gap-1 rounded-full bg-violet-50 px-2.5 py-1.5 text-[9px] font-semibold text-violet-700 sm:inline-flex">
+                <PenLine size={11} />
+                دستی
+              </span>
+            ) : null}
 
             {attendance?.checkIn &&
             attendance?.checkOut &&
@@ -914,14 +1290,58 @@ function AttendanceRow({
               />
             ) : null}
 
-            <ChevronLeft
-              size={16}
-              className="text-slate-300 transition group-hover:text-slate-500"
-            />
+            <Link
+              href={`/admin/attendance/${employee.id}`}
+              aria-label={`مشاهده سوابق ${employee.firstName} ${employee.lastName}`}
+              className="
+                hidden
+                h-9
+                w-9
+                items-center
+                justify-center
+                rounded-xl
+                text-slate-300
+                transition
+                hover:bg-slate-100
+                hover:text-slate-600
+                sm:flex
+              "
+            >
+              <ChevronLeft size={16} />
+            </Link>
           </div>
         </div>
+
+        <div className="flex items-center justify-between gap-2 md:justify-end">
+          <span className="text-[10px] text-slate-400 md:hidden">
+            عملیات
+          </span>
+
+          <ManualAttendanceDialog
+            userId={
+              employee.id
+            }
+            employeeName={`${employee.firstName} ${employee.lastName}`.trim()}
+            dateKey={dateKey}
+            initialCheckIn={
+              formatInputTime(
+                attendance?.checkIn ??
+                  null,
+              )
+            }
+            initialCheckOut={
+              formatInputTime(
+                attendance?.checkOut ??
+                  null,
+              )
+            }
+            initialNote={
+              attendance?.note ?? ""
+            }
+          />
+        </div>
       </div>
-    </Link>
+    </div>
   );
 }
 
@@ -937,22 +1357,22 @@ function StatCard({
   valueClass?: string;
 }) {
   return (
-    <div className="rounded-[22px] border border-slate-200/80 bg-white p-4 shadow-[0_8px_30px_rgba(15,23,42,0.03)]">
+    <div className="min-w-0 rounded-[22px] border border-slate-200/80 bg-white p-4 shadow-[0_8px_30px_rgba(15,23,42,0.03)]">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs font-medium text-slate-400">
+          <p className="truncate text-[10px] font-medium text-slate-400">
             {title}
           </p>
 
           <p
-            className={`mt-2 break-words text-xl font-bold tracking-tight ${valueClass}`}
+            className={`mt-2 break-words text-lg font-bold tracking-tight sm:text-xl ${valueClass}`}
           >
             {value}
           </p>
         </div>
 
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-50 text-slate-500">
-          <Icon size={17} />
+          <Icon size={16} />
         </div>
       </div>
     </div>
@@ -961,11 +1381,9 @@ function StatCard({
 
 function EmptyState() {
   return (
-    <div className="flex min-h-[320px] flex-col items-center justify-center px-6 text-center">
+    <div className="flex min-h-[340px] flex-col items-center justify-center px-6 text-center">
       <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-50 text-slate-300">
-        <CheckCircle2
-          size={27}
-        />
+        <CheckCircle2 size={27} />
       </div>
 
       <h3 className="mt-5 text-base font-bold text-slate-900">

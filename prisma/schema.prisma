@@ -18,43 +18,84 @@ enum AttendanceStatus {
   MANUAL
 }
 
+enum AttendanceAuditAction {
+  CREATE
+  UPDATE
+}
+
+enum LeaveType {
+  ANNUAL
+  SICK
+  UNPAID
+  OTHER
+}
+
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum TemporaryExitType {
+  TEMPORARY
+  MISSION
+}
+
+enum TemporaryExitStatus {
+  OPEN
+  COMPLETED
+}
+
 model User {
-  id           String     @id @default(cuid())
-  username     String     @unique
+  id String @id @default(cuid())
+  username String @unique
   passwordHash String
-  firstName    String
-  lastName     String
-  phone        String?
-  role         UserRole   @default(EMPLOYEE)
-  isActive     Boolean    @default(true)
+  firstName String
+  lastName String
+  phone String?
+  role UserRole @default(EMPLOYEE)
+  isActive Boolean @default(true)
 
-  attendances  Attendance[]
-  sessions     Session[]
+  attendances Attendance[]
+  sessions Session[]
 
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  attendanceAudits AttendanceAudit[] @relation("AttendanceAuditActor")
+
+  leaveRequests Leave[] @relation("LeaveRequester")
+  leaveReviews Leave[] @relation("LeaveReviewer")
+
+  temporaryExits TemporaryExit[]
+  temporaryExitAudits TemporaryExitAudit[] @relation("TemporaryExitAuditActor")
+
+  employeeShifts EmployeeShift[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([role])
   @@index([isActive])
 }
 
 model Attendance {
-  id          String           @id @default(cuid())
+  id String @id @default(cuid())
 
-  userId      String
-  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  workDate    DateTime
+  workDate DateTime
 
-  checkIn     DateTime?
-  checkOut    DateTime?
+  checkIn DateTime?
+  checkOut DateTime?
 
-  status      AttendanceStatus @default(OPEN)
+  status AttendanceStatus @default(OPEN)
+  note String?
 
-  note        String?
+  auditLogs AttendanceAudit[]
+  temporaryExits TemporaryExit[]
 
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([userId, workDate])
   @@index([userId])
@@ -62,49 +103,239 @@ model Attendance {
   @@index([status])
 }
 
+model AttendanceAudit {
+  id String @id @default(cuid())
+
+  attendanceId String
+  attendance Attendance @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+
+  actorId String
+  actor User @relation("AttendanceAuditActor", fields: [actorId], references: [id], onDelete: Restrict)
+
+  action AttendanceAuditAction
+
+  previousCheckIn DateTime?
+  previousCheckOut DateTime?
+  previousStatus AttendanceStatus?
+  previousNote String?
+
+  newCheckIn DateTime?
+  newCheckOut DateTime?
+  newStatus AttendanceStatus?
+  newNote String?
+
+  createdAt DateTime @default(now())
+
+  @@index([attendanceId, createdAt])
+  @@index([actorId, createdAt])
+}
+
+model TemporaryExit {
+  id String @id @default(cuid())
+
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  attendanceId String
+  attendance Attendance @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+
+  type TemporaryExitType @default(TEMPORARY)
+  status TemporaryExitStatus @default(OPEN)
+
+  startedAt DateTime
+  endedAt DateTime?
+
+  reason String?
+  note String?
+
+  auditLogs TemporaryExitAudit[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, startedAt])
+  @@index([attendanceId, startedAt])
+  @@index([status])
+  @@index([type])
+}
+
+model TemporaryExitAudit {
+  id String @id @default(cuid())
+
+  temporaryExitId String
+  temporaryExit TemporaryExit @relation(fields: [temporaryExitId], references: [id], onDelete: Cascade)
+
+  actorId String
+  actor User @relation("TemporaryExitAuditActor", fields: [actorId], references: [id], onDelete: Restrict)
+
+  action AttendanceAuditAction
+
+  previousType TemporaryExitType?
+  previousStatus TemporaryExitStatus?
+  previousStartedAt DateTime?
+  previousEndedAt DateTime?
+  previousReason String?
+  previousNote String?
+
+  newType TemporaryExitType?
+  newStatus TemporaryExitStatus?
+  newStartedAt DateTime?
+  newEndedAt DateTime?
+  newReason String?
+  newNote String?
+
+  createdAt DateTime @default(now())
+
+  @@index([temporaryExitId, createdAt])
+  @@index([actorId, createdAt])
+}
+
+model Leave {
+  id String @id @default(cuid())
+
+  userId String
+  user User @relation("LeaveRequester", fields: [userId], references: [id], onDelete: Cascade)
+
+  type LeaveType @default(ANNUAL)
+  status LeaveStatus @default(PENDING)
+
+  startDate DateTime
+  endDate DateTime
+
+  reason String?
+  note String?
+
+  reviewerId String?
+  reviewer User? @relation("LeaveReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+
+  reviewedAt DateTime?
+  reviewNote String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, startDate, endDate])
+  @@index([status])
+  @@index([type])
+  @@index([reviewerId])
+  @@index([startDate])
+  @@index([endDate])
+}
+
 model Session {
-  id         String   @id @default(cuid())
+  id String @id @default(cuid())
 
-  userId     String
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  tokenHash  String   @unique
+  tokenHash String @unique
+  expiresAt DateTime
 
-  expiresAt  DateTime
-
-  createdAt  DateTime @default(now())
+  createdAt DateTime @default(now())
 
   @@index([userId])
   @@index([expiresAt])
 }
 
 model CompanySettings {
-  id                String   @id @default("company")
+  id String @id @default("company")
 
-  workStartMinutes  Int      @default(510)
-  workEndMinutes    Int      @default(1020)
+  workStartMinutes Int @default(510)
+  workEndMinutes Int @default(1020)
 
-  saturday          Boolean  @default(true)
-  sunday            Boolean  @default(true)
-  monday            Boolean  @default(true)
-  tuesday           Boolean  @default(true)
-  wednesday         Boolean  @default(true)
-  thursday          Boolean  @default(true)
-  friday            Boolean  @default(false)
+  saturday Boolean @default(true)
+  sunday Boolean @default(true)
+  monday Boolean @default(true)
+  tuesday Boolean @default(true)
+  wednesday Boolean @default(true)
+  thursday Boolean @default(true)
+  friday Boolean @default(false)
 
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model CompanyScheduleHistory {
+  id String @id @default(cuid())
+
+  /*
+   * شروع اثرگذاری این برنامه.
+   * این مقدار ابتدای یک روز کاری در timezone پروژه است.
+   */
+  effectiveFrom DateTime @unique
+
+  workStartMinutes Int
+  workEndMinutes Int
+
+  saturday Boolean
+  sunday Boolean
+  monday Boolean
+  tuesday Boolean
+  wednesday Boolean
+  thursday Boolean
+  friday Boolean
+
+  createdAt DateTime @default(now())
+
+  @@index([effectiveFrom])
+}
+
+model Shift {
+  id String @id @default(cuid())
+
+  name String
+
+  startMinutes Int
+  endMinutes Int
+
+  saturday Boolean @default(true)
+  sunday Boolean @default(true)
+  monday Boolean @default(true)
+  tuesday Boolean @default(true)
+  wednesday Boolean @default(true)
+  thursday Boolean @default(true)
+  friday Boolean @default(false)
+
+  isActive Boolean @default(true)
+
+  employeeShifts EmployeeShift[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+  @@index([name])
+}
+
+model EmployeeShift {
+  id String @id @default(cuid())
+
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  shiftId String
+  shift Shift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+
+  startsAt DateTime
+  endsAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, startsAt])
+  @@index([shiftId, startsAt])
+  @@index([endsAt])
 }
 
 model Holiday {
-  id          String   @id @default(cuid())
+  id String @id @default(cuid())
 
-  date        DateTime @unique
-  title       String
+  date DateTime @unique
+  title String
   description String?
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([date])
 }

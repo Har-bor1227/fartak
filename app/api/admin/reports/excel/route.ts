@@ -2,21 +2,26 @@ import { NextResponse } from "next/server";
 import * as XLSX from "xlsx";
 
 import { getCurrentUser } from "@/lib/auth/current-user";
+
 import {
   getEmployeeReport,
   normalizeDateInput,
+  type ReportLeaveType,
+  type ReportTemporaryExitType,
 } from "@/lib/admin/reports";
+
 import {
   formatDate,
   formatTime,
   getDateKey,
+  getDateRange,
 } from "@/lib/date/tehran";
 
 function formatMinutes(
   totalMinutes: number,
 ): string {
   if (totalMinutes <= 0) {
-    return "0 دقیقه";
+    return "۰ دقیقه";
   }
 
   const hours = Math.floor(
@@ -27,28 +32,38 @@ function formatMinutes(
     totalMinutes % 60;
 
   if (hours === 0) {
-    return `${minutes} دقیقه`;
+    return `${minutes.toLocaleString(
+      "fa-IR",
+    )} دقیقه`;
   }
 
   if (minutes === 0) {
-    return `${hours} ساعت`;
+    return `${hours.toLocaleString(
+      "fa-IR",
+    )} ساعت`;
   }
 
-  return `${hours} ساعت و ${minutes} دقیقه`;
+  return `${hours.toLocaleString(
+    "fa-IR",
+  )} ساعت و ${minutes.toLocaleString(
+    "fa-IR",
+  )} دقیقه`;
 }
 
 function formatSignedMinutes(
   totalMinutes: number,
 ): string {
   if (totalMinutes === 0) {
-    return "0 دقیقه";
+    return "۰ دقیقه";
   }
 
   const absolute =
     Math.abs(totalMinutes);
 
   const value =
-    formatMinutes(absolute);
+    formatMinutes(
+      absolute,
+    );
 
   return totalMinutes > 0
     ? `+${value}`
@@ -66,7 +81,7 @@ function getStateText(
       return "در حال کار";
 
     case "ABSENT":
-      return "غایب";
+      return "غیبت";
 
     case "HOLIDAY":
       return "تعطیل";
@@ -77,9 +92,111 @@ function getStateText(
     case "FUTURE":
       return "آینده";
 
+    case "LEAVE":
+      return "مرخصی";
+
     default:
       return "نامشخص";
   }
+}
+
+function getLeaveTypeText(
+  type: ReportLeaveType | null,
+): string {
+  if (!type) {
+    return "—";
+  }
+
+  switch (type) {
+    case "ANNUAL":
+      return "استحقاقی";
+
+    case "SICK":
+      return "استعلاجی";
+
+    case "UNPAID":
+      return "بدون حقوق";
+
+    case "OTHER":
+      return "سایر";
+
+    default:
+      return "مرخصی";
+  }
+}
+
+function getTemporaryExitTypeText(
+  type:
+    | ReportTemporaryExitType
+    | null,
+): string {
+  if (!type) {
+    return "—";
+  }
+
+  return type === "MISSION"
+    ? "مأموریت"
+    : "خروج موقت";
+}
+
+function getTemporaryExitDetails(
+  item: {
+    temporaryExits: Array<{
+      type: ReportTemporaryExitType;
+      status:
+        | "OPEN"
+        | "COMPLETED";
+      startedAt: Date;
+      endedAt: Date | null;
+      durationMinutes: number;
+      reason: string | null;
+    }>;
+  },
+): string {
+  if (
+    !item.temporaryExits.length
+  ) {
+    return "—";
+  }
+
+  return item.temporaryExits
+    .map((exit) => {
+      const type =
+        getTemporaryExitTypeText(
+          exit.type,
+        );
+
+      const start =
+        formatTime(
+          exit.startedAt,
+        );
+
+      const end =
+        exit.endedAt
+          ? formatTime(
+              exit.endedAt,
+            )
+          : "فعال";
+
+      const duration =
+        formatMinutes(
+          exit.durationMinutes,
+        );
+
+      return `${type}: ${start} تا ${end} (${duration})`;
+    })
+    .join("\n");
+}
+
+function formatReportBoundary(
+  value: string,
+): string {
+  const range =
+    getDateRange(value);
+
+  return range
+    ? formatDate(range.start)
+    : value;
 }
 
 export async function GET(
@@ -102,7 +219,9 @@ export async function GET(
       );
     }
 
-    if (user.role !== "ADMIN") {
+    if (
+      user.role !== "ADMIN"
+    ) {
       return NextResponse.json(
         {
           success: false,
@@ -175,36 +294,58 @@ export async function GET(
       );
     }
 
-    /*
-     * جزئیات Excel مستقیماً از calculation
-     * موتور حضور و غیاب خوانده می‌شود.
-     *
-     * بنابراین Excel و صفحه گزارش
-     * دقیقاً یک منطق محاسباتی دارند.
-     */
+    if (report.error) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            report.error ===
+            "RANGE_TOO_LARGE"
+              ? "بازه گزارش بیش از حد بزرگ است."
+              : "بازه گزارش معتبر نیست.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
     const rows =
       report.items.map(
         (item) => {
           const calculation =
             item.calculation;
 
+          const isLeave =
+            calculation.state ===
+            "LEAVE";
+
+          const temporaryExitMinutes =
+            item.temporaryExitMinutes;
+
+          const missionMinutes =
+            item.missionMinutes;
+
           return {
-            تاریخ: formatDate(
-              item.workDate,
-            ),
+            "تاریخ":
+              formatDate(
+                item.workDate,
+              ),
 
             "تاریخ میلادی":
               getDateKey(
                 item.workDate,
               ),
 
-            ورود: formatTime(
-              calculation.checkIn,
-            ),
+            "ورود":
+              formatTime(
+                calculation.checkIn,
+              ),
 
-            خروج: formatTime(
-              calculation.checkOut,
-            ),
+            "خروج":
+              formatTime(
+                calculation.checkOut,
+              ),
 
             "کارکرد":
               formatMinutes(
@@ -214,6 +355,26 @@ export async function GET(
             "موظفی":
               formatMinutes(
                 calculation.scheduledMinutes,
+              ),
+
+            "خروج موقت":
+              formatMinutes(
+                temporaryExitMinutes,
+              ),
+
+            "مأموریت":
+              formatMinutes(
+                missionMinutes,
+              ),
+
+            "تعداد خروج":
+              item.temporaryExitCount.toLocaleString(
+                "fa-IR",
+              ),
+
+            "جزئیات خروج":
+              getTemporaryExitDetails(
+                item,
               ),
 
             "تراز":
@@ -241,17 +402,38 @@ export async function GET(
                 calculation.underworkMinutes,
               ),
 
-            وضعیت:
+            "وضعیت":
               getStateText(
                 calculation.state,
               ),
+
+            "نوع مرخصی":
+              isLeave
+                ? getLeaveTypeText(
+                    item.leaveType,
+                  )
+                : "—",
+
+            "دلیل مرخصی":
+              isLeave
+                ? item.leaveReason ||
+                  "—"
+                : "—",
+
+            "نوع ثبت":
+              item.isManual
+                ? "دستی"
+                : isLeave
+                  ? "مرخصی"
+                  : "خودکار",
 
             "عنوان تعطیلی":
               calculation.holiday
                 ?.title || "—",
 
-            توضیحات:
-              calculation.note || "—",
+            "توضیحات":
+              calculation.note ||
+              "—",
           };
         },
       );
@@ -266,27 +448,31 @@ export async function GET(
       {
         شاخص: "نام کاربری",
         مقدار:
-          report.employee
-            .username,
+          report.employee.username,
       },
 
       {
         شاخص: "وضعیت کارمند",
         مقدار:
-          report.employee
-            .isActive
+          report.employee.isActive
             ? "فعال"
             : "غیرفعال",
       },
 
       {
         شاخص: "از تاریخ",
-        مقدار: report.from,
+        مقدار:
+          formatReportBoundary(
+            report.from,
+          ),
       },
 
       {
         شاخص: "تا تاریخ",
-        مقدار: report.to,
+        مقدار:
+          formatReportBoundary(
+            report.to,
+          ),
       },
 
       {
@@ -302,9 +488,21 @@ export async function GET(
       },
 
       {
+        شاخص: "روزهای ثبت دستی",
+        مقدار:
+          report.manualDays,
+      },
+
+      {
         شاخص: "روزهای ناقص",
         مقدار:
           report.incompleteDays,
+      },
+
+      {
+        شاخص: "روزهای مرخصی",
+        مقدار:
+          report.leaveDays,
       },
 
       {
@@ -344,6 +542,22 @@ export async function GET(
         مقدار:
           formatMinutes(
             report.totalScheduledMinutes,
+          ),
+      },
+
+      {
+        شاخص: "مجموع خروج موقت",
+        مقدار:
+          formatMinutes(
+            report.totalTemporaryExitMinutes,
+          ),
+      },
+
+      {
+        شاخص: "مجموع مأموریت",
+        مقدار:
+          formatMinutes(
+            report.totalMissionMinutes,
           ),
       },
 
@@ -434,7 +648,7 @@ export async function GET(
         wch: 25,
       },
       {
-        wch: 34,
+        wch: 40,
       },
     ];
 
@@ -461,6 +675,18 @@ export async function GET(
         wch: 18,
       },
       {
+        wch: 18,
+      },
+      {
+        wch: 14,
+      },
+      {
+        wch: 55,
+      },
+      {
+        wch: 18,
+      },
+      {
         wch: 16,
       },
       {
@@ -474,6 +700,15 @@ export async function GET(
       },
       {
         wch: 18,
+      },
+      {
+        wch: 18,
+      },
+      {
+        wch: 26,
+      },
+      {
+        wch: 30,
       },
       {
         wch: 22,
@@ -496,10 +731,13 @@ export async function GET(
     );
 
     const buffer =
-      XLSX.write(workbook, {
-        type: "buffer",
-        bookType: "xlsx",
-      });
+      XLSX.write(
+        workbook,
+        {
+          type: "buffer",
+          bookType: "xlsx",
+        },
+      );
 
     const safeName =
       `${report.employee.firstName}-${report.employee.lastName}`

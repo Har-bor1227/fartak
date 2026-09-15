@@ -8,17 +8,16 @@ type DateParts = {
 };
 
 function getDateParts(date: Date): DateParts {
-  const formatter = new Intl.DateTimeFormat(
-    "en-US",
-    {
+  const formatter =
+    new Intl.DateTimeFormat("en-US", {
       timeZone: TIME_ZONE,
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
-    },
-  );
+    });
 
-  const parts = formatter.formatToParts(date);
+  const parts =
+    formatter.formatToParts(date);
 
   return {
     year: Number(
@@ -41,18 +40,95 @@ function getDateParts(date: Date): DateParts {
   };
 }
 
+function isValidDateParts(
+  parts: DateParts,
+): boolean {
+  if (
+    !Number.isInteger(parts.year) ||
+    !Number.isInteger(parts.month) ||
+    !Number.isInteger(parts.day)
+  ) {
+    return false;
+  }
+
+  if (
+    parts.month < 1 ||
+    parts.month > 12 ||
+    parts.day < 1 ||
+    parts.day > 31
+  ) {
+    return false;
+  }
+
+  /*
+   * Date.UTC به‌صورت خودکار تاریخ‌های
+   * نامعتبر مثل 2026-02-31 را normalize می‌کند.
+   *
+   * با مقایسه مجدد اجزای تاریخ، مطمئن
+   * می‌شویم تاریخ واقعاً در تقویم میلادی
+   * معتبر است.
+   */
+  const probe = new Date(
+    Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day,
+      12,
+      0,
+      0,
+      0,
+    ),
+  );
+
+  return (
+    probe.getUTCFullYear() ===
+      parts.year &&
+    probe.getUTCMonth() ===
+      parts.month - 1 &&
+    probe.getUTCDate() ===
+      parts.day
+  );
+}
+
+function addCalendarDays(
+  parts: DateParts,
+  amount: number,
+): DateParts {
+  const probe = new Date(
+    Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day + amount,
+      12,
+      0,
+      0,
+      0,
+    ),
+  );
+
+  return {
+    year:
+      probe.getUTCFullYear(),
+
+    month:
+      probe.getUTCMonth() + 1,
+
+    day:
+      probe.getUTCDate(),
+  };
+}
+
 function getTimeZoneOffsetMs(
   date: Date,
 ): number {
-  const formatter = new Intl.DateTimeFormat(
-    "en-US",
-    {
+  const formatter =
+    new Intl.DateTimeFormat("en-US", {
       timeZone: TIME_ZONE,
       timeZoneName: "shortOffset",
-    },
-  );
+    });
 
-  const parts = formatter.formatToParts(date);
+  const parts =
+    formatter.formatToParts(date);
 
   const value =
     parts.find(
@@ -67,9 +143,10 @@ function getTimeZoneOffsetMs(
     return 0;
   }
 
-  const match = value.match(
-    /^GMT([+-])(\d{1,2})(?::(\d{2}))?$/,
-  );
+  const match =
+    value.match(
+      /^GMT([+-])(\d{1,2})(?::(\d{2}))?$/,
+    );
 
   if (!match) {
     return 0;
@@ -78,11 +155,11 @@ function getTimeZoneOffsetMs(
   const sign =
     match[1] === "+" ? 1 : -1;
 
-  const hours = Number(match[2]);
+  const hours =
+    Number(match[2]);
 
-  const minutes = Number(
-    match[3] || 0,
-  );
+  const minutes =
+    Number(match[3] || 0);
 
   return (
     sign *
@@ -95,24 +172,69 @@ function getTimeZoneOffsetMs(
 function getLocalMidnightUtc(
   parts: DateParts,
 ): Date {
-  const utcGuess = new Date(
-    Date.UTC(
-      parts.year,
-      parts.month - 1,
-      parts.day,
-      0,
-      0,
-      0,
-      0,
-    ),
-  );
+  /*
+   * ابتدا یک حدس در ظهر UTC می‌سازیم.
+   * استفاده از ظهر به‌جای نیمه‌شب احتمال
+   * برخورد با مرزهای تغییر offset را کمتر می‌کند.
+   */
+  const utcGuess =
+    new Date(
+      Date.UTC(
+        parts.year,
+        parts.month - 1,
+        parts.day,
+        12,
+        0,
+        0,
+        0,
+      ),
+    );
 
-  const offset =
-    getTimeZoneOffsetMs(utcGuess);
+  const firstOffset =
+    getTimeZoneOffsetMs(
+      utcGuess,
+    );
 
-  return new Date(
-    utcGuess.getTime() - offset,
-  );
+  let result =
+    new Date(
+      Date.UTC(
+        parts.year,
+        parts.month - 1,
+        parts.day,
+        0,
+        0,
+        0,
+        0,
+      ) - firstOffset,
+    );
+
+  /*
+   * یک بار دیگر offset را از خود timestamp
+   * نهایی می‌گیریم تا اگر timezone در آن
+   * بازه تغییر offset داشته باشد، مقدار
+   * نهایی دقیق‌تر شود.
+   */
+  const secondOffset =
+    getTimeZoneOffsetMs(result);
+
+  if (
+    secondOffset !== firstOffset
+  ) {
+    result =
+      new Date(
+        Date.UTC(
+          parts.year,
+          parts.month - 1,
+          parts.day,
+          0,
+          0,
+          0,
+          0,
+        ) - secondOffset,
+      );
+  }
+
+  return result;
 }
 
 export function getTodayRange() {
@@ -121,26 +243,31 @@ export function getTodayRange() {
   const todayParts =
     getDateParts(now);
 
+  /*
+   * در حالت عادی Intl باید یک تاریخ معتبر
+   * برگرداند؛ این fallback فقط برای جلوگیری
+   * از انتشار Date نامعتبر در لایه‌های بالاتر
+   * گذاشته شده است.
+   */
+  if (
+    !isValidDateParts(
+      todayParts,
+    )
+  ) {
+    throw new Error(
+      "Unable to resolve today's date for the configured timezone.",
+    );
+  }
+
+  const tomorrowParts =
+    addCalendarDays(
+      todayParts,
+      1,
+    );
+
   const start =
     getLocalMidnightUtc(
       todayParts,
-    );
-
-  const tomorrowProbe = new Date(
-    Date.UTC(
-      todayParts.year,
-      todayParts.month - 1,
-      todayParts.day + 1,
-      12,
-      0,
-      0,
-      0,
-    ),
-  );
-
-  const tomorrowParts =
-    getDateParts(
-      tomorrowProbe,
     );
 
   const end =
@@ -166,52 +293,41 @@ export function getDateRange(
     return null;
   }
 
-  const year = Number(
-    match[1],
-  );
+  const year =
+    Number(match[1]);
 
-  const month = Number(
-    match[2],
-  );
+  const month =
+    Number(match[2]);
 
-  const day = Number(
-    match[3],
-  );
+  const day =
+    Number(match[3]);
 
+  const parts: DateParts = {
+    year,
+    month,
+    day,
+  };
+
+  /*
+   * قبلاً فقط بازه 1 تا 31 بررسی می‌شد؛
+   * در نتیجه تاریخ‌هایی مثل 2026-02-31
+   * می‌توانستند وارد سیستم شوند.
+   */
   if (
-    !Number.isInteger(year) ||
-    !Number.isInteger(month) ||
-    !Number.isInteger(day) ||
-    month < 1 ||
-    month > 12 ||
-    day < 1 ||
-    day > 31
+    !isValidDateParts(parts)
   ) {
     return null;
   }
 
   const start =
-    getLocalMidnightUtc({
-      year,
-      month,
-      day,
-    });
-
-  const nextDayProbe = new Date(
-    Date.UTC(
-      year,
-      month - 1,
-      day + 1,
-      12,
-      0,
-      0,
-      0,
-    ),
-  );
+    getLocalMidnightUtc(
+      parts,
+    );
 
   const nextDayParts =
-    getDateParts(
-      nextDayProbe,
+    addCalendarDays(
+      parts,
+      1,
     );
 
   const end =

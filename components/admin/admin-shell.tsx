@@ -25,7 +25,7 @@ export default function AdminShell({
           lastName={lastName}
         />
 
-        <main className="min-w-0 flex-1 pb-24 lg:pb-0">
+        <main className="min-w-0 flex-1 overflow-x-clip pb-24 lg:pb-0">
           {children}
         </main>
       </div>

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { requireAdmin } from "@/lib/auth/current-user";
 import {
   getDateRange,
+  getTodayRange,
 } from "@/lib/date/tehran";
 import { prisma } from "@/lib/prisma";
 
@@ -21,14 +22,18 @@ function parseTimeToMinutes(
     return null;
   }
 
-  const parts = value.split(":");
+  const parts =
+    value.split(":");
 
   if (parts.length !== 2) {
     return null;
   }
 
-  const hours = Number(parts[0]);
-  const minutes = Number(parts[1]);
+  const hours =
+    Number(parts[0]);
+
+  const minutes =
+    Number(parts[1]);
 
   if (
     !Number.isInteger(hours) ||
@@ -46,21 +51,25 @@ function parseTimeToMinutes(
     return null;
   }
 
-  return hours * 60 + minutes;
+  return (
+    hours * 60 +
+    minutes
+  );
 }
 
-const scheduleSchema = z.object({
-  workStart: z.string(),
-  workEnd: z.string(),
+const scheduleSchema =
+  z.object({
+    workStart: z.string(),
+    workEnd: z.string(),
 
-  saturday: z.boolean(),
-  sunday: z.boolean(),
-  monday: z.boolean(),
-  tuesday: z.boolean(),
-  wednesday: z.boolean(),
-  thursday: z.boolean(),
-  friday: z.boolean(),
-});
+    saturday: z.boolean(),
+    sunday: z.boolean(),
+    monday: z.boolean(),
+    tuesday: z.boolean(),
+    wednesday: z.boolean(),
+    thursday: z.boolean(),
+    friday: z.boolean(),
+  });
 
 export async function saveWorkSchedule(
   _previousState: SettingsActionState,
@@ -70,29 +79,50 @@ export async function saveWorkSchedule(
 
   const validation =
     scheduleSchema.safeParse({
-      workStart: formData.get("workStart"),
-      workEnd: formData.get("workEnd"),
+      workStart:
+        formData.get(
+          "workStart",
+        ),
+
+      workEnd:
+        formData.get(
+          "workEnd",
+        ),
 
       saturday:
-        formData.get("saturday") === "on",
+        formData.get(
+          "saturday",
+        ) === "on",
 
       sunday:
-        formData.get("sunday") === "on",
+        formData.get(
+          "sunday",
+        ) === "on",
 
       monday:
-        formData.get("monday") === "on",
+        formData.get(
+          "monday",
+        ) === "on",
 
       tuesday:
-        formData.get("tuesday") === "on",
+        formData.get(
+          "tuesday",
+        ) === "on",
 
       wednesday:
-        formData.get("wednesday") === "on",
+        formData.get(
+          "wednesday",
+        ) === "on",
 
       thursday:
-        formData.get("thursday") === "on",
+        formData.get(
+          "thursday",
+        ) === "on",
 
       friday:
-        formData.get("friday") === "on",
+        formData.get(
+          "friday",
+        ) === "on",
     });
 
   if (!validation.success) {
@@ -124,7 +154,10 @@ export async function saveWorkSchedule(
     };
   }
 
-  if (startMinutes >= endMinutes) {
+  if (
+    startMinutes >=
+    endMinutes
+  ) {
     return {
       success: false,
       message:
@@ -149,70 +182,192 @@ export async function saveWorkSchedule(
     };
   }
 
-  await prisma.companySettings.upsert({
-    where: {
-      id: "company",
-    },
+  const {
+    start: todayStart,
+  } = getTodayRange();
 
-    update: {
-      workStartMinutes: startMinutes,
-      workEndMinutes: endMinutes,
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.companySettings.upsert({
+          where: {
+            id: "company",
+          },
 
-      saturday:
-        validation.data.saturday,
+          update: {
+            workStartMinutes:
+              startMinutes,
 
-      sunday:
-        validation.data.sunday,
+            workEndMinutes:
+              endMinutes,
 
-      monday:
-        validation.data.monday,
+            saturday:
+              validation.data.saturday,
 
-      tuesday:
-        validation.data.tuesday,
+            sunday:
+              validation.data.sunday,
 
-      wednesday:
-        validation.data.wednesday,
+            monday:
+              validation.data.monday,
 
-      thursday:
-        validation.data.thursday,
+            tuesday:
+              validation.data.tuesday,
 
-      friday:
-        validation.data.friday,
-    },
+            wednesday:
+              validation.data.wednesday,
 
-    create: {
-      id: "company",
+            thursday:
+              validation.data.thursday,
 
-      workStartMinutes: startMinutes,
-      workEndMinutes: endMinutes,
+            friday:
+              validation.data.friday,
+          },
 
-      saturday:
-        validation.data.saturday,
+          create: {
+            id: "company",
 
-      sunday:
-        validation.data.sunday,
+            workStartMinutes:
+              startMinutes,
 
-      monday:
-        validation.data.monday,
+            workEndMinutes:
+              endMinutes,
 
-      tuesday:
-        validation.data.tuesday,
+            saturday:
+              validation.data.saturday,
 
-      wednesday:
-        validation.data.wednesday,
+            sunday:
+              validation.data.sunday,
 
-      thursday:
-        validation.data.thursday,
+            monday:
+              validation.data.monday,
 
-      friday:
-        validation.data.friday,
-    },
-  });
+            tuesday:
+              validation.data.tuesday,
 
-  revalidatePath("/admin/settings");
-  revalidatePath("/admin");
-  revalidatePath("/admin/attendance");
-  revalidatePath("/admin/reports");
+            wednesday:
+              validation.data.wednesday,
+
+            thursday:
+              validation.data.thursday,
+
+            friday:
+              validation.data.friday,
+          },
+        });
+
+        await tx.companyScheduleHistory.upsert({
+          where: {
+            effectiveFrom:
+              todayStart,
+          },
+
+          update: {
+            workStartMinutes:
+              startMinutes,
+
+            workEndMinutes:
+              endMinutes,
+
+            saturday:
+              validation.data.saturday,
+
+            sunday:
+              validation.data.sunday,
+
+            monday:
+              validation.data.monday,
+
+            tuesday:
+              validation.data.tuesday,
+
+            wednesday:
+              validation.data.wednesday,
+
+            thursday:
+              validation.data.thursday,
+
+            friday:
+              validation.data.friday,
+          },
+
+          create: {
+            effectiveFrom:
+              todayStart,
+
+            workStartMinutes:
+              startMinutes,
+
+            workEndMinutes:
+              endMinutes,
+
+            saturday:
+              validation.data.saturday,
+
+            sunday:
+              validation.data.sunday,
+
+            monday:
+              validation.data.monday,
+
+            tuesday:
+              validation.data.tuesday,
+
+            wednesday:
+              validation.data.wednesday,
+
+            thursday:
+              validation.data.thursday,
+
+            friday:
+              validation.data.friday,
+          },
+        });
+      },
+      {
+        isolationLevel:
+          "Serializable",
+      },
+    );
+  } catch (error) {
+    console.error(
+      "Save work schedule error:",
+      error,
+    );
+
+    return {
+      success: false,
+      message:
+        "ذخیره برنامه کاری انجام نشد. دوباره تلاش کنید.",
+    };
+  }
+
+  revalidatePath(
+    "/admin/settings",
+  );
+
+  revalidatePath(
+    "/admin",
+  );
+
+  revalidatePath(
+    "/admin/attendance",
+  );
+
+  revalidatePath(
+    "/admin/attendance/[userId]",
+  );
+
+  revalidatePath(
+    "/admin/calendar",
+  );
+
+  revalidatePath(
+    "/admin/reports",
+  );
+
+  revalidatePath(
+    "/employee",
+  );
 
   return {
     success: true,
@@ -221,36 +376,37 @@ export async function saveWorkSchedule(
   };
 }
 
-const holidaySchema = z.object({
-  date: z
-    .string()
-    .regex(
-      /^\d{4}-\d{2}-\d{2}$/,
-      "تاریخ معتبر نیست.",
-    ),
+const holidaySchema =
+  z.object({
+    date: z
+      .string()
+      .regex(
+        /^\d{4}-\d{2}-\d{2}$/,
+        "تاریخ معتبر نیست.",
+      ),
 
-  title: z
-    .string()
-    .trim()
-    .min(
-      2,
-      "عنوان تعطیلی حداقل باید ۲ کاراکتر باشد.",
-    )
-    .max(
-      100,
-      "عنوان تعطیلی بیش از حد طولانی است.",
-    ),
+    title: z
+      .string()
+      .trim()
+      .min(
+        2,
+        "عنوان تعطیلی حداقل باید ۲ کاراکتر باشد.",
+      )
+      .max(
+        100,
+        "عنوان تعطیلی بیش از حد طولانی است.",
+      ),
 
-  description: z
-    .string()
-    .trim()
-    .max(
-      300,
-      "توضیحات بیش از حد طولانی است.",
-    )
-    .optional()
-    .or(z.literal("")),
-});
+    description: z
+      .string()
+      .trim()
+      .max(
+        300,
+        "توضیحات بیش از حد طولانی است.",
+      )
+      .optional()
+      .or(z.literal("")),
+  });
 
 export async function createHoliday(
   _previousState: SettingsActionState,
@@ -260,24 +416,36 @@ export async function createHoliday(
 
   const validation =
     holidaySchema.safeParse({
-      date: formData.get("date"),
-      title: formData.get("title"),
+      date:
+        formData.get(
+          "date",
+        ),
+
+      title:
+        formData.get(
+          "title",
+        ),
+
       description:
-        formData.get("description"),
+        formData.get(
+          "description",
+        ),
     });
 
   if (!validation.success) {
     return {
       success: false,
       message:
-        validation.error.issues[0]?.message ||
+        validation.error
+          .issues[0]?.message ||
         "اطلاعات تعطیلی معتبر نیست.",
     };
   }
 
-  const range = getDateRange(
-    validation.data.date,
-  );
+  const range =
+    getDateRange(
+      validation.data.date,
+    );
 
   if (!range) {
     return {
@@ -287,39 +455,71 @@ export async function createHoliday(
     };
   }
 
-  const existing =
-    await prisma.holiday.findUnique({
-      where: {
-        date: range.start,
-      },
+  try {
+    await prisma.holiday.create({
+      data: {
+        date:
+          range.start,
 
-      select: {
-        id: true,
+        title:
+          validation.data.title,
+
+        description:
+          validation.data
+            .description ||
+          null,
       },
     });
+  } catch (error) {
+    console.error(
+      "Create holiday error:",
+      error,
+    );
 
-  if (existing) {
+    if (
+      typeof error ===
+        "object" &&
+      error !== null &&
+      "code" in error &&
+      (
+        error as {
+          code?: unknown;
+        }
+      ).code === "P2002"
+    ) {
+      return {
+        success: false,
+        message:
+          "برای این تاریخ قبلاً تعطیلی ثبت شده است.",
+      };
+    }
+
     return {
       success: false,
       message:
-        "برای این تاریخ قبلاً تعطیلی ثبت شده است.",
+        "ثبت تعطیلی انجام نشد. دوباره تلاش کنید.",
     };
   }
 
-  await prisma.holiday.create({
-    data: {
-      date: range.start,
-      title: validation.data.title,
-      description:
-        validation.data.description ||
-        null,
-    },
-  });
+  revalidatePath(
+    "/admin/settings",
+  );
 
-  revalidatePath("/admin/settings");
-  revalidatePath("/admin");
-  revalidatePath("/admin/attendance");
-  revalidatePath("/admin/reports");
+  revalidatePath(
+    "/admin",
+  );
+
+  revalidatePath(
+    "/admin/attendance",
+  );
+
+  revalidatePath(
+    "/admin/calendar",
+  );
+
+  revalidatePath(
+    "/admin/reports",
+  );
 
   return {
     success: true,
@@ -341,35 +541,55 @@ export async function deleteHoliday(
     };
   }
 
-  const holiday =
-    await prisma.holiday.findUnique({
-      where: {
-        id: holidayId,
-      },
+  try {
+    const result =
+      await prisma.holiday.deleteMany({
+        where: {
+          id: holidayId,
+        },
+      });
 
-      select: {
-        id: true,
-      },
-    });
+    if (
+      result.count !== 1
+    ) {
+      return {
+        success: false,
+        message:
+          "تعطیلی موردنظر پیدا نشد.",
+      };
+    }
+  } catch (error) {
+    console.error(
+      "Delete holiday error:",
+      error,
+    );
 
-  if (!holiday) {
     return {
       success: false,
       message:
-        "تعطیلی موردنظر پیدا نشد.",
+        "حذف تعطیلی انجام نشد. دوباره تلاش کنید.",
     };
   }
 
-  await prisma.holiday.delete({
-    where: {
-      id: holiday.id,
-    },
-  });
+  revalidatePath(
+    "/admin/settings",
+  );
 
-  revalidatePath("/admin/settings");
-  revalidatePath("/admin");
-  revalidatePath("/admin/attendance");
-  revalidatePath("/admin/reports");
+  revalidatePath(
+    "/admin",
+  );
+
+  revalidatePath(
+    "/admin/attendance",
+  );
+
+  revalidatePath(
+    "/admin/calendar",
+  );
+
+  revalidatePath(
+    "/admin/reports",
+  );
 
   return {
     success: true,

@@ -1,15 +1,24 @@
 import { requireAdmin } from "@/lib/auth/current-user";
+
 import {
   calculateAttendanceDay,
   type AttendanceCalculation,
   type AttendanceHoliday,
   type AttendanceRecord,
-  type AttendanceSchedule,
 } from "@/lib/attendance/engine";
+
+import {
+  getCompanyScheduleHistory,
+  getDefaultAttendanceSchedule,
+  getEmployeeShiftAssignments,
+  resolveEmployeeSchedule,
+} from "@/lib/attendance/schedule-resolver";
+
 import {
   getDateKey,
   getDateRange,
 } from "@/lib/date/tehran";
+
 import { prisma } from "@/lib/prisma";
 
 export type EmployeeReportQuery = {
@@ -18,12 +27,47 @@ export type EmployeeReportQuery = {
   to?: string | null;
 };
 
+export type EmployeeReportError =
+  | "RANGE_TOO_LARGE"
+  | "INVALID_RANGE";
+
+export type ReportLeaveType =
+  | "ANNUAL"
+  | "SICK"
+  | "UNPAID"
+  | "OTHER";
+
+export type ReportTemporaryExitType =
+  | "TEMPORARY"
+  | "MISSION";
+
+export type EmployeeReportTemporaryExit = {
+  id: string;
+  type: ReportTemporaryExitType;
+  status: "OPEN" | "COMPLETED";
+  startedAt: Date;
+  endedAt: Date | null;
+  reason: string | null;
+  durationMinutes: number;
+};
+
 export type EmployeeReportItem = {
   id: string;
   workDate: Date;
   checkIn: Date | null;
   checkOut: Date | null;
   status: string;
+  isManual: boolean;
+
+  leaveType: ReportLeaveType | null;
+  leaveReason: string | null;
+
+  temporaryExitMinutes: number;
+  missionMinutes: number;
+  temporaryExitCount: number;
+
+  temporaryExits: EmployeeReportTemporaryExit[];
+
   calculation: AttendanceCalculation;
 };
 
@@ -40,15 +84,19 @@ export type EmployeeReportResult = {
   from: string;
   to: string;
 
+  error: EmployeeReportError | null;
+
   items: EmployeeReportItem[];
 
   attendanceDays: number;
   completedDays: number;
   incompleteDays: number;
+  manualDays: number;
   absentDays: number;
   holidayDays: number;
   nonWorkingDays: number;
   futureDays: number;
+  leaveDays: number;
 
   totalWorkedMinutes: number;
   totalScheduledMinutes: number;
@@ -59,10 +107,58 @@ export type EmployeeReportResult = {
   totalOvertimeMinutes: number;
   totalUnderworkMinutes: number;
 
+  totalTemporaryExitMinutes: number;
+  totalMissionMinutes: number;
+
   averageWorkedMinutes: number;
 
   firstCheckIn: Date | null;
   lastCheckOut: Date | null;
+};
+
+export const REPORT_MAX_DAYS = 366;
+
+function createEmptyReport(
+  employee: EmployeeReportResult["employee"],
+  from: string,
+  to: string,
+  error: EmployeeReportError | null = null,
+): EmployeeReportResult {
+  return {
+    employee,
+    from,
+    to,
+    error,
+
+    items: [],
+
+    attendanceDays: 0,
+    completedDays: 0,
+    incompleteDays: 0,
+    manualDays: 0,
+    absentDays: 0,
+    holidayDays: 0,
+    nonWorkingDays: 0,
+    futureDays: 0,
+    leaveDays: 0,
+
+    totalWorkedMinutes: 0,
+    totalScheduledMinutes: 0,
+    totalBalanceMinutes: 0,
+
+    totalLateMinutes: 0,
+    totalEarlyLeaveMinutes: 0,
+    totalOvertimeMinutes: 0,
+    totalUnderworkMinutes: 0,
+
+    totalTemporaryExitMinutes: 0,
+    totalMissionMinutes: 0,
+
+    averageWorkedMinutes: 0,
+
+    firstCheckIn: null,
+    lastCheckOut: null,
+  };
 }
 
 export function normalizeDateInput(
@@ -72,13 +168,21 @@ export function normalizeDateInput(
     return null;
   }
 
-  const normalized = value.trim();
+  const normalized =
+    value.trim();
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(
+      normalized,
+    )
+  ) {
     return null;
   }
 
-  const range = getDateRange(normalized);
+  const range =
+    getDateRange(
+      normalized,
+    );
 
   if (!range) {
     return null;
@@ -87,49 +191,66 @@ export function normalizeDateInput(
   return normalized;
 }
 
+function addCalendarDays(
+  dateKey: string,
+  amount: number,
+): string | null {
+  const range =
+    getDateRange(
+      dateKey,
+    );
+
+  if (!range) {
+    return null;
+  }
+
+  const probe =
+    new Date(
+      Date.UTC(
+        range.start.getUTCFullYear(),
+        range.start.getUTCMonth(),
+        range.start.getUTCDate() +
+          amount,
+        12,
+        0,
+        0,
+        0,
+      ),
+    );
+
+  return getDateKey(
+    probe,
+  );
+}
+
 export function getDefaultReportRange() {
-  const todayKey = getDateKey(new Date());
+  const todayKey =
+    getDateKey(
+      new Date(),
+    );
 
-  const [year, month, day] = todayKey
-    .split("-")
-    .map(Number);
-
-  const fromProbe = new Date(
-    Date.UTC(
-      year,
-      month - 1,
-      day - 29,
-      12,
-      0,
-      0,
-      0,
-    ),
-  );
-
-  const toProbe = new Date(
-    Date.UTC(
-      year,
-      month - 1,
-      day,
-      12,
-      0,
-      0,
-      0,
-    ),
-  );
+  const from =
+    addCalendarDays(
+      todayKey,
+      -29,
+    ) ?? todayKey;
 
   return {
-    from: getDateKey(fromProbe),
-    to: getDateKey(toProbe),
+    from,
+    to: todayKey,
   };
 }
 
 function resolveQuery(
-  input: EmployeeReportQuery | string,
+  input:
+    | EmployeeReportQuery
+    | string,
   fromInput?: string | null,
   toInput?: string | null,
 ): EmployeeReportQuery {
-  if (typeof input === "string") {
+  if (
+    typeof input === "string"
+  ) {
     return {
       employeeId: input,
       from: fromInput,
@@ -140,78 +261,208 @@ function resolveQuery(
   return input;
 }
 
-function addDays(
-  date: Date,
-  amount: number,
-): Date {
-  const result = new Date(date);
-  result.setUTCDate(
-    result.getUTCDate() + amount,
-  );
-  return result;
-}
-
 function getDateKeysBetween(
   from: Date,
   to: Date,
 ): string[] {
   const keys: string[] = [];
 
-  let current = new Date(from);
+  let currentKey =
+    getDateKey(from);
 
-  while (current < to) {
-    keys.push(getDateKey(current));
-    current = addDays(current, 1);
+  const endKey =
+    getDateKey(to);
+
+  while (
+    currentKey < endKey
+  ) {
+    keys.push(
+      currentKey,
+    );
+
+    const nextKey =
+      addCalendarDays(
+        currentKey,
+        1,
+      );
+
+    if (!nextKey) {
+      break;
+    }
+
+    currentKey =
+      nextKey;
   }
 
   return keys;
+}
+
+function getRangeDayCount(
+  from: Date,
+  to: Date,
+): number {
+  const difference =
+    to.getTime() -
+    from.getTime();
+
+  if (difference <= 0) {
+    return 0;
+  }
+
+  return Math.ceil(
+    difference /
+      (24 * 60 * 60 * 1000),
+  );
 }
 
 function getAttendanceRecordKey(
   record: {
     workDate: Date;
   },
-) {
-  return getDateKey(record.workDate);
+): string {
+  return getDateKey(
+    record.workDate,
+  );
 }
 
 function getHolidayKey(
   holiday: {
     date: Date;
   },
+): string {
+  return getDateKey(
+    holiday.date,
+  );
+}
+
+function getLeaveKey(
+  leave: {
+    startDate: Date;
+    endDate: Date;
+  },
+  dateKey: string,
+): boolean {
+  const range =
+    getDateRange(
+      dateKey,
+    );
+
+  if (!range) {
+    return false;
+  }
+
+  return (
+    leave.startDate <
+      range.end &&
+    leave.endDate >=
+      range.start
+  );
+}
+
+function createLeaveCalculation(
+  calculation: AttendanceCalculation,
+): AttendanceCalculation {
+  return {
+    ...calculation,
+
+    state:
+      "LEAVE" as AttendanceCalculation["state"],
+
+    checkIn: null,
+    checkOut: null,
+
+    workedMinutes: 0,
+    lateMinutes: 0,
+    earlyLeaveMinutes: 0,
+    overtimeMinutes: 0,
+    underworkMinutes: 0,
+    balanceMinutes: 0,
+
+    hasAttendance: false,
+    isComplete: false,
+
+    attendanceStatus: null,
+  };
+}
+
+function getExitDurationMinutes(
+  startedAt: Date,
+  endedAt: Date | null,
+  now: Date,
+): number {
+  const end =
+    endedAt ??
+    now;
+
+  const difference =
+    end.getTime() -
+    startedAt.getTime();
+
+  if (difference <= 0) {
+    return 0;
+  }
+
+  return Math.floor(
+    difference / 60000,
+  );
+}
+
+function toEngineTemporaryExit(
+  exit: {
+    type:
+      | "TEMPORARY"
+      | "MISSION";
+    status:
+      | "OPEN"
+      | "COMPLETED";
+    startedAt: Date;
+    endedAt: Date | null;
+  },
 ) {
-  return getDateKey(holiday.date);
+  return {
+    type: exit.type,
+    status: exit.status,
+    startedAt: exit.startedAt,
+    endedAt: exit.endedAt,
+  };
 }
 
 export async function getEmployeeReport(
-  input: EmployeeReportQuery | string,
+  input:
+    | EmployeeReportQuery
+    | string,
   fromInput?: string | null,
   toInput?: string | null,
 ): Promise<EmployeeReportResult | null> {
   await requireAdmin();
 
-  const query = resolveQuery(
-    input,
-    fromInput,
-    toInput,
-  );
+  const query =
+    resolveQuery(
+      input,
+      fromInput,
+      toInput,
+    );
 
   const defaults =
     getDefaultReportRange();
 
   const from =
-    normalizeDateInput(query.from) ??
-    defaults.from;
+    normalizeDateInput(
+      query.from,
+    ) ?? defaults.from;
 
   const to =
-    normalizeDateInput(query.to) ??
-    defaults.to;
+    normalizeDateInput(
+      query.to,
+    ) ?? defaults.to;
 
   const employee =
     await prisma.user.findUnique({
       where: {
         id: query.employeeId,
+        role: "EMPLOYEE",
       },
+
       select: {
         id: true,
         firstName: true,
@@ -226,55 +477,67 @@ export async function getEmployeeReport(
     return null;
   }
 
-  const fromRange = getDateRange(from);
-  const toRange = getDateRange(to);
+  const fromRange =
+    getDateRange(from);
 
-  if (!fromRange || !toRange) {
-    return {
+  const toRange =
+    getDateRange(to);
+
+  if (
+    !fromRange ||
+    !toRange
+  ) {
+    return createEmptyReport(
       employee,
       from,
       to,
+      "INVALID_RANGE",
+    );
+  }
 
-      items: [],
-
-      attendanceDays: 0,
-      completedDays: 0,
-      incompleteDays: 0,
-      absentDays: 0,
-      holidayDays: 0,
-      nonWorkingDays: 0,
-      futureDays: 0,
-
-      totalWorkedMinutes: 0,
-      totalScheduledMinutes: 0,
-      totalBalanceMinutes: 0,
-
-      totalLateMinutes: 0,
-      totalEarlyLeaveMinutes: 0,
-      totalOvertimeMinutes: 0,
-      totalUnderworkMinutes: 0,
-
-      averageWorkedMinutes: 0,
-
-      firstCheckIn: null,
-      lastCheckOut: null,
-    };
+  if (
+    toRange.start <
+    fromRange.start
+  ) {
+    return createEmptyReport(
+      employee,
+      from,
+      to,
+      "INVALID_RANGE",
+    );
   }
 
   const rangeStart =
-    fromRange.start <= toRange.start
-      ? fromRange.start
-      : toRange.start;
+    fromRange.start;
 
   const rangeEnd =
-    fromRange.start <= toRange.start
-      ? toRange.end
-      : fromRange.end;
+    toRange.end;
+
+  const rangeDayCount =
+    getRangeDayCount(
+      rangeStart,
+      rangeEnd,
+    );
+
+  if (
+    rangeDayCount >
+    REPORT_MAX_DAYS
+  ) {
+    return createEmptyReport(
+      employee,
+      from,
+      to,
+      "RANGE_TOO_LARGE",
+    );
+  }
 
   const [
     settings,
     holidays,
     attendances,
+    leaves,
+    shiftAssignments,
+    companyScheduleHistory,
   ] = await Promise.all([
     prisma.companySettings.findUnique({
       where: {
@@ -285,10 +548,14 @@ export async function getEmployeeReport(
     prisma.holiday.findMany({
       where: {
         date: {
-          gte: rangeStart,
-          lt: rangeEnd,
+          gte:
+            rangeStart,
+
+          lt:
+            rangeEnd,
         },
       },
+
       orderBy: {
         date: "asc",
       },
@@ -296,76 +563,178 @@ export async function getEmployeeReport(
 
     prisma.attendance.findMany({
       where: {
-        userId: query.employeeId,
+        userId:
+          query.employeeId,
+
         workDate: {
-          gte: rangeStart,
-          lt: rangeEnd,
+          gte:
+            rangeStart,
+
+          lt:
+            rangeEnd,
         },
       },
+
       orderBy: {
         workDate: "asc",
       },
+
+      include: {
+        temporaryExits: {
+          orderBy: {
+            startedAt:
+              "asc",
+          },
+
+          select: {
+            id: true,
+            type: true,
+            status: true,
+            startedAt: true,
+            endedAt: true,
+            reason: true,
+            note: true,
+          },
+        },
+      },
+    }),
+
+    prisma.leave.findMany({
+      where: {
+        userId:
+          query.employeeId,
+
+        status:
+          "APPROVED",
+
+        startDate: {
+          lt:
+            rangeEnd,
+        },
+
+        endDate: {
+          gte:
+            rangeStart,
+        },
+      },
+
+      orderBy: {
+        startDate: "asc",
+      },
+
+      select: {
+        id: true,
+        type: true,
+        startDate: true,
+        endDate: true,
+        reason: true,
+      },
+    }),
+
+    getEmployeeShiftAssignments({
+      userIds: [
+        query.employeeId,
+      ],
+
+      from:
+        rangeStart,
+
+      to:
+        rangeEnd,
+    }),
+
+    getCompanyScheduleHistory({
+      from:
+        rangeStart,
+
+      to:
+        rangeEnd,
     }),
   ]);
 
-  const schedule: AttendanceSchedule =
-    settings ?? {
-      workStartMinutes: 510,
-      workEndMinutes: 1020,
+  const fallbackSchedule =
+    getDefaultAttendanceSchedule(
+      settings,
+    );
 
-      saturday: true,
-      sunday: true,
-      monday: true,
-      tuesday: true,
-      wednesday: true,
-      thursday: true,
-      friday: false,
-    };
-
-  /*
-   * Engine's AttendanceHoliday type intentionally
-   * does not carry the database `id`.
-   *
-   * We therefore keep the raw Prisma holiday records
-   * separate and adapt only the data Engine needs.
-   */
   const holidayMap =
-    new Map<string, AttendanceHoliday>();
+    new Map<
+      string,
+      AttendanceHoliday
+    >();
 
-  for (const holiday of holidays) {
-    const engineHoliday =
-      {
-        ...holiday,
-        workDate: holiday.date,
-      } as unknown as AttendanceHoliday;
-
+  for (
+    const holiday of holidays
+  ) {
     holidayMap.set(
-      getHolidayKey(holiday),
-      engineHoliday,
+      getHolidayKey(
+        holiday,
+      ),
+      {
+        title:
+          holiday.title,
+
+        description:
+          holiday.description,
+      },
     );
   }
 
-  /*
-   * Same idea for attendance:
-   * Engine does not need the database id,
-   * but report items do.
-   */
   const attendanceMap =
     new Map<
       string,
       {
         id: string;
         record: AttendanceRecord;
+        isManual: boolean;
+        temporaryExits:
+          typeof attendances[number]["temporaryExits"];
       }
     >();
 
-  for (const attendance of attendances) {
+  for (
+    const attendance of
+      attendances
+  ) {
     attendanceMap.set(
-      getAttendanceRecordKey(attendance),
+      getAttendanceRecordKey(
+        attendance,
+      ),
       {
-        id: attendance.id,
-        record:
-          attendance as AttendanceRecord,
+        id:
+          attendance.id,
+
+        record: {
+          workDate:
+            attendance.workDate,
+
+          checkIn:
+            attendance.checkIn,
+
+          checkOut:
+            attendance.checkOut,
+
+          status:
+            attendance.status,
+
+          note:
+            attendance.note,
+
+          temporaryExits:
+            attendance
+              .temporaryExits
+              .map(
+                toEngineTemporaryExit,
+              ),
+        } as AttendanceRecord,
+
+        isManual:
+          attendance.status ===
+          "MANUAL",
+
+        temporaryExits:
+          attendance
+            .temporaryExits,
       },
     );
   }
@@ -376,15 +745,18 @@ export async function getEmployeeReport(
       rangeEnd,
     );
 
-  const items: EmployeeReportItem[] = [];
+  const items:
+    EmployeeReportItem[] = [];
 
   let attendanceDays = 0;
   let completedDays = 0;
   let incompleteDays = 0;
+  let manualDays = 0;
   let absentDays = 0;
   let holidayDays = 0;
   let nonWorkingDays = 0;
   let futureDays = 0;
+  let leaveDays = 0;
 
   let totalWorkedMinutes = 0;
   let totalScheduledMinutes = 0;
@@ -395,106 +767,288 @@ export async function getEmployeeReport(
   let totalOvertimeMinutes = 0;
   let totalUnderworkMinutes = 0;
 
+  let totalTemporaryExitMinutes = 0;
+  let totalMissionMinutes = 0;
+
   const checkIns: Date[] = [];
   const checkOuts: Date[] = [];
 
-  for (const dateKey of dateKeys) {
+  const now =
+    new Date();
+
+  for (
+    const dateKey of dateKeys
+  ) {
     const dayRange =
-      getDateRange(dateKey);
+      getDateRange(
+        dateKey,
+      );
 
     if (!dayRange) {
       continue;
     }
 
     const attendanceEntry =
-      attendanceMap.get(dateKey);
+      attendanceMap.get(
+        dateKey,
+      );
 
     const attendance =
-      attendanceEntry?.record ?? null;
+      attendanceEntry?.record ??
+      null;
 
     const holiday =
-      holidayMap.get(dateKey) ?? null;
+      holidayMap.get(
+        dateKey,
+      ) ?? null;
+
+    const schedule =
+      resolveEmployeeSchedule({
+        assignments:
+          shiftAssignments,
+
+        userId:
+          query.employeeId,
+
+        workDate:
+          dayRange.start,
+
+        fallbackSchedule,
+
+        companyScheduleHistory,
+
+        currentCompanySettings:
+          settings,
+      });
 
     const calculation =
       calculateAttendanceDay({
-        workDate: dayRange.start,
+        workDate:
+          dayRange.start,
+
         schedule,
+
         holiday,
+
         attendance,
+
+        now,
       });
 
-    if (calculation.isHoliday) {
-      holidayDays += 1;
-    }
+    const approvedLeave =
+      leaves.find(
+        (leave) =>
+          getLeaveKey(
+            leave,
+            dateKey,
+          ),
+      ) ?? null;
 
-    if (!calculation.isWorkingDay) {
-      nonWorkingDays += 1;
-    }
+    const hasRealAttendance =
+      attendance !== null;
 
-    if (calculation.isFuture) {
-      futureDays += 1;
+    const isLeaveDay =
+      Boolean(
+        approvedLeave &&
+          !hasRealAttendance &&
+          calculation.isWorkingDay &&
+          !calculation.isHoliday &&
+          !calculation.isFuture,
+      );
+
+    const effectiveCalculation =
+      isLeaveDay
+        ? createLeaveCalculation(
+            calculation,
+          )
+        : calculation;
+
+    const isManual =
+      attendanceEntry?.isManual ??
+      false;
+
+    if (isManual) {
+      manualDays += 1;
     }
 
     if (
-      calculation.state === "PRESENT" ||
-      calculation.state === "WORKING"
+      effectiveCalculation
+        .isHoliday
+    ) {
+      holidayDays += 1;
+    }
+
+    if (
+      !effectiveCalculation
+        .isWorkingDay
+    ) {
+      nonWorkingDays += 1;
+    }
+
+    if (
+      effectiveCalculation
+        .isFuture
+    ) {
+      futureDays += 1;
+    }
+
+    if (isLeaveDay) {
+      leaveDays += 1;
+    }
+
+    if (
+      effectiveCalculation.state ===
+        "PRESENT" ||
+      effectiveCalculation.state ===
+        "WORKING"
     ) {
       attendanceDays += 1;
     }
 
     if (
-      calculation.checkIn &&
-      calculation.checkOut
+      effectiveCalculation.checkIn &&
+      effectiveCalculation.checkOut
     ) {
       completedDays += 1;
     }
 
     if (
-      calculation.checkIn &&
-      !calculation.checkOut &&
-      calculation.isWorkingDay &&
-      !calculation.isHoliday &&
-      !calculation.isFuture
+      effectiveCalculation.checkIn &&
+      !effectiveCalculation.checkOut &&
+      effectiveCalculation.isWorkingDay &&
+      !effectiveCalculation.isHoliday &&
+      !effectiveCalculation.isFuture
     ) {
       incompleteDays += 1;
     }
 
     if (
-      calculation.state === "ABSENT"
+      effectiveCalculation.state ===
+      "ABSENT"
     ) {
       absentDays += 1;
     }
 
+    const temporaryExits =
+      attendanceEntry
+        ?.temporaryExits.map(
+          (exit) => {
+            const durationMinutes =
+              getExitDurationMinutes(
+                exit.startedAt,
+                exit.endedAt,
+                now,
+              );
+
+            return {
+              id:
+                exit.id,
+
+              type:
+                exit.type as ReportTemporaryExitType,
+
+              status:
+                exit.status,
+
+              startedAt:
+                exit.startedAt,
+
+              endedAt:
+                exit.endedAt,
+
+              reason:
+                exit.reason,
+
+              durationMinutes,
+            };
+          },
+        ) ?? [];
+
+    const temporaryExitMinutes =
+      temporaryExits.reduce(
+        (
+          total,
+          exit,
+        ) =>
+          total +
+          exit.durationMinutes,
+        0,
+      );
+
+    const missionMinutes =
+      temporaryExits
+        .filter(
+          (exit) =>
+            exit.type ===
+            "MISSION",
+        )
+        .reduce(
+          (
+            total,
+            exit,
+          ) =>
+            total +
+            exit.durationMinutes,
+          0,
+        );
+
+    const effectiveTemporaryExitMinutes =
+      isLeaveDay
+        ? 0
+        : temporaryExitMinutes;
+
+    const effectiveMissionMinutes =
+      isLeaveDay
+        ? 0
+        : missionMinutes;
+
     totalWorkedMinutes +=
-      calculation.workedMinutes;
+      effectiveCalculation
+        .workedMinutes;
 
     totalScheduledMinutes +=
-      calculation.scheduledMinutes;
+      effectiveCalculation
+        .scheduledMinutes;
 
     totalBalanceMinutes +=
-      calculation.balanceMinutes;
+      effectiveCalculation
+        .balanceMinutes;
 
     totalLateMinutes +=
-      calculation.lateMinutes;
+      effectiveCalculation
+        .lateMinutes;
 
     totalEarlyLeaveMinutes +=
-      calculation.earlyLeaveMinutes;
+      effectiveCalculation
+        .earlyLeaveMinutes;
 
     totalOvertimeMinutes +=
-      calculation.overtimeMinutes;
+      effectiveCalculation
+        .overtimeMinutes;
 
     totalUnderworkMinutes +=
-      calculation.underworkMinutes;
+      effectiveCalculation
+        .underworkMinutes;
 
-    if (calculation.checkIn) {
+    totalTemporaryExitMinutes +=
+      effectiveTemporaryExitMinutes;
+
+    totalMissionMinutes +=
+      effectiveMissionMinutes;
+
+    if (
+      effectiveCalculation.checkIn
+    ) {
       checkIns.push(
-        calculation.checkIn,
+        effectiveCalculation.checkIn,
       );
     }
 
-    if (calculation.checkOut) {
+    if (
+      effectiveCalculation.checkOut
+    ) {
       checkOuts.push(
-        calculation.checkOut,
+        effectiveCalculation.checkOut,
       );
     }
 
@@ -503,53 +1057,90 @@ export async function getEmployeeReport(
         attendanceEntry?.id ??
         `virtual-${query.employeeId}-${dateKey}`,
 
-      workDate: dayRange.start,
+      workDate:
+        dayRange.start,
 
       checkIn:
-        calculation.checkIn,
+        effectiveCalculation.checkIn,
 
       checkOut:
-        calculation.checkOut,
+        effectiveCalculation.checkOut,
 
       status:
-        calculation.attendanceStatus ??
-        calculation.state,
+        attendance?.status ??
+        effectiveCalculation
+          .attendanceStatus ??
+        effectiveCalculation
+          .state,
 
-      calculation,
+      isManual,
+
+      leaveType:
+        isLeaveDay
+          ? (approvedLeave?.type as ReportLeaveType) ??
+            null
+          : null,
+
+      leaveReason:
+        isLeaveDay
+          ? approvedLeave?.reason ??
+            null
+          : null,
+
+      temporaryExitMinutes:
+        effectiveTemporaryExitMinutes,
+
+      missionMinutes:
+        effectiveMissionMinutes,
+
+      temporaryExitCount:
+        isLeaveDay
+          ? 0
+          : temporaryExits.length,
+
+      temporaryExits:
+        isLeaveDay
+          ? []
+          : temporaryExits,
+
+      calculation:
+        effectiveCalculation,
     });
   }
 
-  let firstCheckIn: Date | null =
-    null;
+  const firstCheckIn =
+    checkIns.length > 0
+      ? checkIns.reduce(
+          (
+            first,
+            current,
+          ) =>
+            current.getTime() <
+            first.getTime()
+              ? current
+              : first,
+        )
+      : null;
 
-  for (const date of checkIns) {
-    if (
-      !firstCheckIn ||
-      date.getTime() <
-        firstCheckIn.getTime()
-    ) {
-      firstCheckIn = date;
-    }
-  }
-
-  let lastCheckOut: Date | null =
-    null;
-
-  for (const date of checkOuts) {
-    if (
-      !lastCheckOut ||
-      date.getTime() >
-        lastCheckOut.getTime()
-    ) {
-      lastCheckOut = date;
-    }
-  }
+  const lastCheckOut =
+    checkOuts.length > 0
+      ? checkOuts.reduce(
+          (
+            last,
+            current,
+          ) =>
+            current.getTime() >
+            last.getTime()
+              ? current
+              : last,
+        )
+      : null;
 
   const workedDays =
     items.filter(
       (item) =>
-        item.calculation.workedMinutes >
-        0,
+        item.calculation
+          .workedMinutes > 0,
     ).length;
 
   const averageWorkedMinutes =
@@ -566,15 +1157,19 @@ export async function getEmployeeReport(
     from,
     to,
 
+    error: null,
+
     items,
 
     attendanceDays,
     completedDays,
     incompleteDays,
+    manualDays,
     absentDays,
     holidayDays,
     nonWorkingDays,
     futureDays,
+    leaveDays,
 
     totalWorkedMinutes,
     totalScheduledMinutes,
@@ -584,6 +1179,9 @@ export async function getEmployeeReport(
     totalEarlyLeaveMinutes,
     totalOvertimeMinutes,
     totalUnderworkMinutes,
+
+    totalTemporaryExitMinutes,
+    totalMissionMinutes,
 
     averageWorkedMinutes,
 

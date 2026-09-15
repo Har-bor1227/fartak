@@ -1,6 +1,10 @@
+
 "use client";
 
-import { useEffect, useState } from "react";
+import {
+  useEffect,
+  useState,
+} from "react";
 
 function getDuration(
   start: Date,
@@ -8,22 +12,28 @@ function getDuration(
 ) {
   const milliseconds = Math.max(
     0,
-    end.getTime() - start.getTime(),
+    end.getTime() -
+      start.getTime(),
   );
 
-  const totalMinutes = Math.floor(
-    milliseconds / 60000,
-  );
+  const totalMinutes =
+    Math.floor(
+      milliseconds / 60000,
+    );
 
-  const hours = Math.floor(
-    totalMinutes / 60,
-  );
+  const hours =
+    Math.floor(
+      totalMinutes / 60,
+    );
 
-  const minutes = totalMinutes % 60;
+  const minutes =
+    totalMinutes % 60;
 
-  const seconds = Math.floor(
-    (milliseconds % 60000) / 1000,
-  );
+  const seconds =
+    Math.floor(
+      (milliseconds % 60000) /
+        1000,
+    );
 
   return {
     hours,
@@ -33,7 +43,9 @@ function getDuration(
 }
 
 function pad(value: number) {
-  return value.toString().padStart(2, "0");
+  return value
+    .toString()
+    .padStart(2, "0");
 }
 
 export default function EmployeeDuration({
@@ -44,39 +56,79 @@ export default function EmployeeDuration({
   checkOut?: string | null;
 }) {
   const [now, setNow] =
-    useState(() => new Date());
+    useState<Date | null>(null);
 
   useEffect(() => {
+    const current = new Date();
+
+    setNow(current);
+
     if (checkOut) {
       return;
     }
 
-    const interval = window.setInterval(
-      () => {
+    const interval =
+      window.setInterval(() => {
         setNow(new Date());
-      },
-      1000,
-    );
+      }, 1000);
 
     return () =>
-      window.clearInterval(interval);
+      window.clearInterval(
+        interval,
+      );
   }, [checkOut]);
 
-  const duration = getDuration(
-    new Date(checkIn),
+  const end =
     checkOut
       ? new Date(checkOut)
-      : now,
-  );
+      : now;
+
+  const duration = end
+    ? getDuration(
+        new Date(checkIn),
+        end,
+      )
+    : {
+        hours: 0,
+        minutes: 0,
+        seconds: 0,
+      };
 
   return (
     <span
       dir="ltr"
-      className="font-mono text-2xl font-bold tracking-tight text-slate-950"
+      aria-label="مدت حضور"
+      className="
+        inline-flex
+        items-baseline
+        rounded-xl
+        text-2xl
+        font-bold
+        tracking-tight
+        text-white
+        sm:text-[26px]
+      "
     >
-      {pad(duration.hours)}:
-      {pad(duration.minutes)}:
-      {pad(duration.seconds)}
+      <span className="font-mono tabular-nums">
+        {pad(duration.hours)}
+      </span>
+
+      <span className="mx-0.5 text-slate-500">
+        :
+      </span>
+
+      <span className="font-mono tabular-nums">
+        {pad(duration.minutes)}
+      </span>
+
+      <span className="mx-0.5 text-slate-500">
+        :
+      </span>
+
+      <span className="font-mono tabular-nums">
+        {pad(duration.seconds)}
+      </span>
     </span>
   );
 }
+

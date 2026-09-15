@@ -1,6 +1,6 @@
-
 import type {
   AttendanceStatus,
+  LeaveType,
 } from "@/app/generated/prisma/client";
 
 export type AttendanceSchedule = {
@@ -21,18 +21,31 @@ export type AttendanceHoliday = {
   description: string | null;
 };
 
+export type AttendanceLeave = {
+  type: LeaveType;
+};
+
+export type AttendanceTemporaryExit = {
+  type: "TEMPORARY" | "MISSION";
+  status: "OPEN" | "COMPLETED";
+  startedAt: Date;
+  endedAt: Date | null;
+};
+
 export type AttendanceRecord = {
   workDate: Date;
   checkIn: Date | null;
   checkOut: Date | null;
   status: AttendanceStatus;
   note: string | null;
+  temporaryExits?: AttendanceTemporaryExit[];
 };
 
 export type AttendanceDayState =
   | "PRESENT"
   | "WORKING"
   | "ABSENT"
+  | "LEAVE"
   | "HOLIDAY"
   | "NON_WORKING"
   | "FUTURE";
@@ -43,8 +56,10 @@ export type AttendanceCalculation = {
   isWorkingDay: boolean;
   isHoliday: boolean;
   isFuture: boolean;
+  isLeave: boolean;
 
   holiday: AttendanceHoliday | null;
+  leave: AttendanceLeave | null;
 
   scheduledStartMinutes: number;
   scheduledEndMinutes: number;
@@ -54,6 +69,7 @@ export type AttendanceCalculation = {
   checkOut: Date | null;
 
   workedMinutes: number;
+  temporaryExitMinutes: number;
 
   lateMinutes: number;
   earlyLeaveMinutes: number;
@@ -332,6 +348,218 @@ function isFutureDate(
   );
 }
 
+function normalizeTemporaryExits(
+  exits:
+    | AttendanceTemporaryExit[]
+    | undefined,
+): AttendanceTemporaryExit[] {
+  if (!exits?.length) {
+    return [];
+  }
+
+  return exits
+    .filter(
+      (exit) =>
+        exit.startedAt instanceof
+        Date,
+    )
+    .sort(
+      (a, b) =>
+        a.startedAt.getTime() -
+        b.startedAt.getTime(),
+    );
+}
+
+function getTemporaryExitMinutes(
+  attendance: AttendanceRecord | null,
+  now: Date,
+): number {
+  if (
+    !attendance?.checkIn
+  ) {
+    return 0;
+  }
+
+  const exits =
+    normalizeTemporaryExits(
+      attendance.temporaryExits,
+    );
+
+  if (!exits.length) {
+    return 0;
+  }
+
+  const attendanceStart =
+    attendance.checkIn;
+
+  const attendanceEnd =
+    attendance.checkOut ??
+    now;
+
+  const intervals: Array<{
+    start: Date;
+    end: Date;
+  }> = [];
+
+  for (const exit of exits) {
+    const exitStart =
+      exit.startedAt;
+
+    /*
+     * خروجی که قبل از ورود یا از زمان ورود شروع شده،
+     * نمی‌تواند بخشی از زمان خروج معتبر این حضور باشد.
+     */
+    if (
+      exitStart.getTime() <=
+      attendanceStart.getTime()
+    ) {
+      continue;
+    }
+
+    /*
+     * خروجی‌ای که بعد از پایان حضور شروع شده،
+     * نباید در کارکرد این رکورد محاسبه شود.
+     */
+    if (
+      exitStart.getTime() >=
+      attendanceEnd.getTime()
+    ) {
+      continue;
+    }
+
+    let exitEnd =
+      exit.endedAt ??
+      null;
+
+    /*
+     * رکورد COMPLETED بدون endedAt داده نامعتبر دارد.
+     * برای جلوگیری از محاسبه اشتباه، آن را نادیده می‌گیریم.
+     */
+    if (
+      exit.status === "COMPLETED" &&
+      !exitEnd
+    ) {
+      continue;
+    }
+
+    /*
+     * خروج OPEN تا زمان فعلی ادامه دارد؛
+     * البته نه بیشتر از پایان حضور.
+     */
+    if (!exitEnd) {
+      exitEnd =
+        now.getTime() <
+        attendanceEnd.getTime()
+          ? now
+          : attendanceEnd;
+    }
+
+    const boundedStart =
+      exitStart.getTime() >
+      attendanceStart.getTime()
+        ? exitStart
+        : attendanceStart;
+
+    const boundedEnd =
+      exitEnd.getTime() <
+      attendanceEnd.getTime()
+        ? exitEnd
+        : attendanceEnd;
+
+    if (
+      boundedEnd.getTime() <=
+      boundedStart.getTime()
+    ) {
+      continue;
+    }
+
+    intervals.push({
+      start: boundedStart,
+      end: boundedEnd,
+    });
+  }
+
+  if (!intervals.length) {
+    return 0;
+  }
+
+  /*
+   * بازه‌ها را مرتب می‌کنیم و سپس Union می‌گیریم.
+   *
+   * مثال:
+   * 10:00 → 11:00
+   * 10:30 → 12:00
+   *
+   * نتیجه:
+   * 10:00 → 12:00
+   *
+   * بنابراین overlap هرگز دوبار از کارکرد
+   * کسر نمی‌شود.
+   */
+  intervals.sort(
+    (a, b) =>
+      a.start.getTime() -
+      b.start.getTime(),
+  );
+
+  let totalMilliseconds = 0;
+
+  let mergedStart =
+    intervals[0].start;
+
+  let mergedEnd =
+    intervals[0].end;
+
+  for (
+    let index = 1;
+    index < intervals.length;
+    index += 1
+  ) {
+    const current =
+      intervals[index];
+
+    /*
+     * اگر بازه جدید با قبلی overlap یا حتی
+     * دقیقاً به آن چسبیده باشد، merge می‌کنیم.
+     */
+    if (
+      current.start.getTime() <=
+      mergedEnd.getTime()
+    ) {
+      if (
+        current.end.getTime() >
+        mergedEnd.getTime()
+      ) {
+        mergedEnd =
+          current.end;
+      }
+
+      continue;
+    }
+
+    totalMilliseconds +=
+      mergedEnd.getTime() -
+      mergedStart.getTime();
+
+    mergedStart =
+      current.start;
+
+    mergedEnd =
+      current.end;
+  }
+
+  totalMilliseconds +=
+    mergedEnd.getTime() -
+    mergedStart.getTime();
+
+  return Math.max(
+    0,
+    Math.floor(
+      totalMilliseconds / 60000,
+    ),
+  );
+}
+
 function getWorkedMinutes(
   attendance: AttendanceRecord | null,
   now: Date,
@@ -347,9 +575,22 @@ function getWorkedMinutes(
     attendance.checkOut ??
     now;
 
-  return getDifferenceInMinutes(
-    attendance.checkIn,
-    end,
+  const rawMinutes =
+    getDifferenceInMinutes(
+      attendance.checkIn,
+      end,
+    );
+
+  const temporaryExitMinutes =
+    getTemporaryExitMinutes(
+      attendance,
+      now,
+    );
+
+  return Math.max(
+    0,
+    rawMinutes -
+      temporaryExitMinutes,
   );
 }
 
@@ -359,6 +600,7 @@ export function calculateAttendanceDay(
     attendance: AttendanceRecord | null;
     schedule: AttendanceSchedule;
     holiday?: AttendanceHoliday | null;
+    leave?: AttendanceLeave | null;
     now?: Date;
   },
 ): AttendanceCalculation {
@@ -373,8 +615,14 @@ export function calculateAttendanceDay(
   const holiday =
     input.holiday ?? null;
 
+  const leave =
+    input.leave ?? null;
+
   const isHoliday =
     holiday !== null;
+
+  const isLeave =
+    leave !== null;
 
   const isWorkingDay =
     getIsWorkingDay(
@@ -421,6 +669,12 @@ export function calculateAttendanceDay(
         scheduledStartMinutes,
     );
 
+  const temporaryExitMinutes =
+    getTemporaryExitMinutes(
+      attendance,
+      now,
+    );
+
   const workedMinutes =
     getWorkedMinutes(
       attendance,
@@ -429,18 +683,36 @@ export function calculateAttendanceDay(
 
   let state: AttendanceDayState;
 
-  if (isFuture) {
-    state = "FUTURE";
-  } else if (isHoliday) {
+  /*
+   * ترتیب اولویت وضعیت‌ها:
+   *
+   * ۱. تعطیل
+   * ۲. روز غیرکاری
+   * ۳. حضور واقعی ثبت‌شده
+   * ۴. مرخصی تأییدشده
+   * ۵. تاریخ آینده
+   * ۶. غیبت
+   */
+  if (isHoliday) {
     state = "HOLIDAY";
   } else if (!isWorkingDay) {
     state = "NON_WORKING";
-  } else if (!hasAttendance) {
-    state = "ABSENT";
-  } else if (!checkOut) {
-    state = "WORKING";
-  } else {
+  } else if (
+    hasAttendance &&
+    checkOut
+  ) {
     state = "PRESENT";
+  } else if (
+    hasAttendance &&
+    checkIn
+  ) {
+    state = "WORKING";
+  } else if (isLeave) {
+    state = "LEAVE";
+  } else if (isFuture) {
+    state = "FUTURE";
+  } else {
+    state = "ABSENT";
   }
 
   let lateMinutes = 0;
@@ -451,13 +723,13 @@ export function calculateAttendanceDay(
   /*
    * تأخیر ورود
    *
-   * فقط برای روز کاری واقعی و
-   * رکورد دارای ورود محاسبه می‌شود.
+   * خروج موقت هیچ اثری روی زمان ورود ندارد.
    */
   if (
     checkIn &&
     isWorkingDay &&
     !isHoliday &&
+    !isLeave &&
     !isFuture
   ) {
     const actualCheckInMinutes =
@@ -474,16 +746,14 @@ export function calculateAttendanceDay(
   }
 
   /*
-   * محاسبات خروج
-   *
-   * تعجیل و اضافه‌کاری بر اساس
-   * ساعت خروج واقعی نسبت به پایان
-   * برنامه کاری محاسبه می‌شوند.
+   * تعجیل و اضافه‌کاری بر اساس خروج نهایی
+   * محاسبه می‌شوند، نه آخرین بازگشت موقت.
    */
   if (
     checkOut &&
     isWorkingDay &&
     !isHoliday &&
+    !isLeave &&
     !isFuture
   ) {
     const actualCheckOutMinutes =
@@ -509,13 +779,14 @@ export function calculateAttendanceDay(
   }
 
   /*
-   * کم‌کاری فقط زمانی قطعی است که
-   * خروج هم ثبت شده باشد.
+   * کم‌کاری بر اساس کارکرد واقعی
+   * بعد از کسر خروج‌های موقت محاسبه می‌شود.
    */
   if (
     isComplete &&
     isWorkingDay &&
     !isHoliday &&
+    !isLeave &&
     !isFuture &&
     workedMinutes <
       scheduledMinutes
@@ -526,12 +797,13 @@ export function calculateAttendanceDay(
   }
 
   /*
-   * تراز فقط روی رکورد کامل معنی دارد.
+   * تراز نیز بر اساس کارکرد واقعی است.
    */
   const balanceMinutes =
     isComplete &&
     isWorkingDay &&
     !isHoliday &&
+    !isLeave &&
     !isFuture
       ? workedMinutes -
         scheduledMinutes
@@ -543,8 +815,10 @@ export function calculateAttendanceDay(
     isWorkingDay,
     isHoliday,
     isFuture,
+    isLeave,
 
     holiday,
+    leave,
 
     scheduledStartMinutes,
     scheduledEndMinutes,
@@ -554,6 +828,7 @@ export function calculateAttendanceDay(
     checkOut,
 
     workedMinutes,
+    temporaryExitMinutes,
 
     lateMinutes,
     earlyLeaveMinutes,
@@ -691,6 +966,9 @@ export function getAttendanceStateLabel(
     case "ABSENT":
       return "غیبت";
 
+    case "LEAVE":
+      return "مرخصی";
+
     case "HOLIDAY":
       return "تعطیل";
 
@@ -704,4 +982,3 @@ export function getAttendanceStateLabel(
       return "نامشخص";
   }
 }
-

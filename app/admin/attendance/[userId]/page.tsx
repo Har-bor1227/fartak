@@ -1,8 +1,9 @@
 import Link from "next/link";
 import type { LucideIcon } from "lucide-react";
 import {
-  ArrowLeft,
   ArrowRight,
+  ArrowRightLeft,
+  BriefcaseBusiness,
   CalendarDays,
   CheckCircle2,
   Clock3,
@@ -16,15 +17,23 @@ import {
 
 import AdminShell from "@/components/admin/admin-shell";
 
-import { requireAdmin } from "@/lib/auth/current-user";
+import {
+  requireAdmin,
+} from "@/lib/auth/current-user";
 
 import {
   calculateAttendanceDay,
   type AttendanceCalculation,
   type AttendanceHoliday,
   type AttendanceRecord as EngineAttendanceRecord,
-  type AttendanceSchedule,
 } from "@/lib/attendance/engine";
+
+import {
+  getCompanyScheduleHistory,
+  getDefaultAttendanceSchedule,
+  getEmployeeShiftAssignments,
+  resolveEmployeeSchedule,
+} from "@/lib/attendance/schedule-resolver";
 
 import {
   formatDate,
@@ -51,6 +60,20 @@ type Employee = {
   isActive: boolean;
 };
 
+type TemporaryExit = {
+  id: string;
+  type:
+    | "TEMPORARY"
+    | "MISSION";
+  status:
+    | "OPEN"
+    | "COMPLETED";
+  startedAt: Date;
+  endedAt: Date | null;
+  reason: string | null;
+  note: string | null;
+};
+
 type AttendanceRecord = {
   id: string;
   workDate: Date;
@@ -58,6 +81,21 @@ type AttendanceRecord = {
   checkOut: Date | null;
   status: string;
   note: string | null;
+  temporaryExits: TemporaryExit[];
+};
+
+type LeaveType =
+  | "ANNUAL"
+  | "SICK"
+  | "UNPAID"
+  | "OTHER";
+
+type LeaveRecord = {
+  id: string;
+  type: LeaveType;
+  startDate: Date;
+  endDate: Date;
+  reason: string | null;
 };
 
 type AttendanceDay = {
@@ -65,6 +103,8 @@ type AttendanceDay = {
   workDate: Date;
   attendance: AttendanceRecord | null;
   calculation: AttendanceCalculation;
+  temporaryExits: TemporaryExit[];
+  leave: LeaveRecord | null;
 };
 
 function formatMinutes(
@@ -74,22 +114,31 @@ function formatMinutes(
     return "۰ دقیقه";
   }
 
-  const hours = Math.floor(
-    totalMinutes / 60,
-  );
+  const hours =
+    Math.floor(
+      totalMinutes / 60,
+    );
 
   const minutes =
     totalMinutes % 60;
 
   if (hours === 0) {
-    return `${minutes} دقیقه`;
+    return `${minutes.toLocaleString(
+      "fa-IR",
+    )} دقیقه`;
   }
 
   if (minutes === 0) {
-    return `${hours} ساعت`;
+    return `${hours.toLocaleString(
+      "fa-IR",
+    )} ساعت`;
   }
 
-  return `${hours} ساعت و ${minutes} دقیقه`;
+  return `${hours.toLocaleString(
+    "fa-IR",
+  )} ساعت و ${minutes.toLocaleString(
+    "fa-IR",
+  )} دقیقه`;
 }
 
 function formatSignedMinutes(
@@ -99,9 +148,12 @@ function formatSignedMinutes(
     return "۰ دقیقه";
   }
 
-  const value = formatMinutes(
-    Math.abs(totalMinutes),
-  );
+  const value =
+    formatMinutes(
+      Math.abs(
+        totalMinutes,
+      ),
+    );
 
   return totalMinutes > 0
     ? `+${value}`
@@ -120,6 +172,9 @@ function getStateLabel(
 
     case "ABSENT":
       return "غایب";
+
+    case "LEAVE":
+      return "مرخصی";
 
     case "HOLIDAY":
       return "تعطیل";
@@ -148,6 +203,9 @@ function getStateClass(
     case "ABSENT":
       return "bg-rose-50 text-rose-700";
 
+    case "LEAVE":
+      return "bg-violet-50 text-violet-700";
+
     case "HOLIDAY":
       return "bg-violet-50 text-violet-700";
 
@@ -175,6 +233,9 @@ function getStateIcon(
     case "ABSENT":
       return UserX;
 
+    case "LEAVE":
+      return CalendarDays;
+
     case "HOLIDAY":
       return CalendarDays;
 
@@ -189,29 +250,154 @@ function getStateIcon(
   }
 }
 
-function addOneDay(
-  dateKey: string,
+function getTemporaryExitLabel(
+  type: TemporaryExit["type"],
 ): string {
-  const parts = dateKey
-    .split("-")
-    .map(Number);
-
-  const probe = new Date(
-    Date.UTC(
-      parts[0],
-      parts[1] - 1,
-      parts[2] + 1,
-      12,
-      0,
-      0,
-      0,
-    ),
-  );
-
-  return getDateKey(probe);
+  return type === "MISSION"
+    ? "مأموریت"
+    : "خروج موقت";
 }
 
-function getMonthRange(
+function getTemporaryExitIcon(
+  type: TemporaryExit["type"],
+): LucideIcon {
+  return type === "MISSION"
+    ? BriefcaseBusiness
+    : ArrowRightLeft;
+}
+
+function getLeaveTypeLabel(
+  type: LeaveType,
+): string {
+  switch (type) {
+    case "ANNUAL":
+      return "استحقاقی";
+
+    case "SICK":
+      return "استعلاجی";
+
+    case "UNPAID":
+      return "بدون حقوق";
+
+    case "OTHER":
+      return "سایر";
+  }
+}
+
+function getExitDurationMinutes(
+  exit: TemporaryExit,
+  now: Date,
+): number {
+  const end =
+    exit.endedAt ??
+    now;
+
+  const difference =
+    end.getTime() -
+    exit.startedAt.getTime();
+
+  if (difference <= 0) {
+    return 0;
+  }
+
+  return Math.floor(
+    difference / 60000,
+  );
+}
+
+function toEngineAttendance(
+  attendance:
+    | AttendanceRecord
+    | null,
+): EngineAttendanceRecord | null {
+  if (!attendance) {
+    return null;
+  }
+
+  return {
+    workDate:
+      attendance.workDate,
+
+    checkIn:
+      attendance.checkIn,
+
+    checkOut:
+      attendance.checkOut,
+
+    status:
+      attendance.status as EngineAttendanceRecord["status"],
+
+    note:
+      attendance.note,
+
+    temporaryExits:
+      attendance.temporaryExits.map(
+        (exit) => ({
+          type:
+            exit.type,
+
+          status:
+            exit.status,
+
+          startedAt:
+            exit.startedAt,
+
+          endedAt:
+            exit.endedAt,
+        }),
+      ),
+  };
+}
+
+function isLeaveForDate(
+  leave: LeaveRecord,
+  dateKey: string,
+): boolean {
+  const range =
+    getDateRange(
+      dateKey,
+    );
+
+  if (!range) {
+    return false;
+  }
+
+  return (
+    leave.startDate <
+      range.end &&
+    leave.endDate >=
+      range.start
+  );
+}
+
+function createLeaveCalculation(
+  calculation: AttendanceCalculation,
+): AttendanceCalculation {
+  return {
+    ...calculation,
+
+    state:
+      "LEAVE" as AttendanceCalculation["state"],
+
+    checkIn: null,
+    checkOut: null,
+
+    workedMinutes: 0,
+    lateMinutes: 0,
+    earlyLeaveMinutes: 0,
+    overtimeMinutes: 0,
+    underworkMinutes: 0,
+    balanceMinutes: 0,
+
+    hasAttendance: false,
+    isComplete: false,
+
+    attendanceStatus: null,
+    note: null,
+  };
+}
+
+function getCurrentMonthRange(
   todayKey: string,
 ) {
   const [
@@ -224,23 +410,10 @@ function getMonthRange(
   const monthStartKey =
     `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-01`;
 
-  const nextMonthProbe =
-    new Date(
-      Date.UTC(
-        year,
-        month,
-        1,
-        12,
-        0,
-        0,
-        0,
-      ),
-    );
-
   const nextMonthKey =
-    getDateKey(
-      nextMonthProbe,
-    );
+    month === 12
+      ? `${String(year + 1).padStart(4, "0")}-01-01`
+      : `${String(year).padStart(4, "0")}-${String(month + 1).padStart(2, "0")}-01`;
 
   const start =
     getDateRange(
@@ -257,28 +430,69 @@ function getMonthRange(
   }
 
   return {
-    start: start.start,
-    end: end.start,
+    start:
+      start.start,
+
+    end:
+      end.start,
+
     monthStartKey,
     nextMonthKey,
   };
 }
 
-function getDateKeys(
-  startKey: string,
-  endKey: string,
-): string[] {
-  const result: string[] = [];
+function addOneDay(
+  dateKey: string,
+): string | null {
+  const range =
+    getDateRange(dateKey);
 
-  let current = startKey;
-
-  while (current < endKey) {
-    result.push(current);
-    current =
-      addOneDay(current);
+  if (!range) {
+    return null;
   }
 
-  return result;
+  const probe = new Date(
+    Date.UTC(
+      range.start.getUTCFullYear(),
+      range.start.getUTCMonth(),
+      range.start.getUTCDate() + 1,
+      12,
+      0,
+      0,
+      0,
+    ),
+  );
+
+  return getDateKey(probe);
+}
+
+function getMonthDateKeys(
+  monthStartKey: string,
+  nextMonthKey: string,
+): string[] {
+  const keys: string[] = [];
+
+  let currentKey =
+    monthStartKey;
+
+  while (
+    currentKey <
+    nextMonthKey
+  ) {
+    keys.push(currentKey);
+
+    const nextKey =
+      addOneDay(currentKey);
+
+    if (!nextKey) {
+      break;
+    }
+
+    currentKey =
+      nextKey;
+  }
+
+  return keys;
 }
 
 export default async function EmployeeAttendancePage({
@@ -294,6 +508,7 @@ export default async function EmployeeAttendancePage({
     await prisma.user.findUnique({
       where: {
         id: userId,
+        role: "EMPLOYEE",
       },
 
       select: {
@@ -335,6 +550,7 @@ export default async function EmployeeAttendancePage({
               <ArrowRight
                 size={17}
               />
+
               بازگشت
             </Link>
           </div>
@@ -344,10 +560,14 @@ export default async function EmployeeAttendancePage({
   }
 
   const todayKey =
-    getDateKey(new Date());
+    getDateKey(
+      new Date(),
+    );
 
   const monthRange =
-    getMonthRange(todayKey);
+    getCurrentMonthRange(
+      todayKey,
+    );
 
   if (!monthRange) {
     throw new Error(
@@ -359,6 +579,9 @@ export default async function EmployeeAttendancePage({
     settings,
     holidays,
     attendances,
+    leaves,
+    shiftAssignments,
+    companyScheduleHistory,
   ] = await Promise.all([
     prisma.companySettings.findUnique({
       where: {
@@ -369,8 +592,11 @@ export default async function EmployeeAttendancePage({
     prisma.holiday.findMany({
       where: {
         date: {
-          gte: monthRange.start,
-          lt: monthRange.end,
+          gte:
+            monthRange.start,
+
+          lt:
+            monthRange.end,
         },
       },
 
@@ -381,10 +607,15 @@ export default async function EmployeeAttendancePage({
 
     prisma.attendance.findMany({
       where: {
-        userId: employee.id,
+        userId:
+          employee.id,
+
         workDate: {
-          gte: monthRange.start,
-          lt: monthRange.end,
+          gte:
+            monthRange.start,
+
+          lt:
+            monthRange.end,
         },
       },
 
@@ -395,27 +626,85 @@ export default async function EmployeeAttendancePage({
         checkOut: true,
         status: true,
         note: true,
+
+        temporaryExits: {
+          orderBy: {
+            startedAt:
+              "asc",
+          },
+
+          select: {
+            id: true,
+            type: true,
+            status: true,
+            startedAt: true,
+            endedAt: true,
+            reason: true,
+            note: true,
+          },
+        },
       },
 
       orderBy: {
         workDate: "asc",
       },
     }),
+
+    prisma.leave.findMany({
+      where: {
+        userId:
+          employee.id,
+
+        status:
+          "APPROVED",
+
+        startDate: {
+          lt:
+            monthRange.end,
+        },
+
+        endDate: {
+          gte:
+            monthRange.start,
+        },
+      },
+
+      orderBy: {
+        startDate:
+          "asc",
+      },
+
+      select: {
+        id: true,
+        type: true,
+        startDate: true,
+        endDate: true,
+        reason: true,
+      },
+    }),
+
+    getEmployeeShiftAssignments({
+      userIds: [
+        employee.id,
+      ],
+      from:
+        monthRange.start,
+      to:
+        monthRange.end,
+    }),
+
+    getCompanyScheduleHistory({
+      from:
+        monthRange.start,
+      to:
+        monthRange.end,
+    }),
   ]);
 
-  const schedule: AttendanceSchedule =
-    settings ?? {
-      workStartMinutes: 510,
-      workEndMinutes: 1020,
-
-      saturday: true,
-      sunday: true,
-      monday: true,
-      tuesday: true,
-      wednesday: true,
-      thursday: true,
-      friday: false,
-    };
+  const fallbackSchedule =
+    getDefaultAttendanceSchedule(
+      settings,
+    );
 
   const attendanceMap =
     new Map<
@@ -423,7 +712,10 @@ export default async function EmployeeAttendancePage({
       AttendanceRecord
     >();
 
-  for (const attendance of attendances) {
+  for (
+    const attendance of
+      attendances
+  ) {
     attendanceMap.set(
       getDateKey(
         attendance.workDate,
@@ -438,83 +730,165 @@ export default async function EmployeeAttendancePage({
       AttendanceHoliday
     >();
 
-  for (const holiday of holidays) {
+  for (
+    const holiday of
+      holidays
+  ) {
     holidayMap.set(
-      getDateKey(holiday.date),
+      getDateKey(
+        holiday.date,
+      ),
       {
-        workDate: holiday.date,
-        title: holiday.title,
+        title:
+          holiday.title,
+
         description:
           holiday.description,
-      } as AttendanceHoliday,
+      },
     );
   }
 
+  const normalizedLeaves:
+    LeaveRecord[] =
+    leaves.map(
+      (leave) => ({
+        id:
+          leave.id,
+
+        type:
+          leave.type as LeaveType,
+
+        startDate:
+          leave.startDate,
+
+        endDate:
+          leave.endDate,
+
+        reason:
+          leave.reason,
+      }),
+    );
+
   const dateKeys =
-    getDateKeys(
+    getMonthDateKeys(
       monthRange.monthStartKey,
       monthRange.nextMonthKey,
     );
 
-  const days: AttendanceDay[] =
+  const now =
+    new Date();
+
+  const days:
+    AttendanceDay[] =
     dateKeys
-      .map((dateKey) => {
-        const range =
-          getDateRange(dateKey);
+      .map(
+        (dateKey) => {
+          const range =
+            getDateRange(
+              dateKey,
+            );
 
-        if (!range) {
-          return null;
-        }
+          if (!range) {
+            return null;
+          }
 
-        const attendance =
-          attendanceMap.get(
-            dateKey,
-          ) ?? null;
+          const attendance =
+            attendanceMap.get(
+              dateKey,
+            ) ?? null;
 
-        const holiday =
-          holidayMap.get(
-            dateKey,
-          ) ?? null;
+          const holiday =
+            holidayMap.get(
+              dateKey,
+            ) ?? null;
 
-        const engineAttendance =
-          attendance
-            ? ({
-                workDate:
-                  attendance.workDate,
-                checkIn:
-                  attendance.checkIn,
-                checkOut:
-                  attendance.checkOut,
-                status:
-                  attendance.status,
-                note:
-                  attendance.note,
-              } as EngineAttendanceRecord)
-            : null;
+          const schedule =
+            resolveEmployeeSchedule({
+              assignments:
+                shiftAssignments,
 
-        const calculation =
-          calculateAttendanceDay({
+              userId:
+                employee.id,
+
+              workDate:
+                range.start,
+
+              fallbackSchedule,
+
+              companyScheduleHistory,
+
+              currentCompanySettings:
+                settings,
+            });
+
+          const rawCalculation =
+            calculateAttendanceDay({
+              workDate:
+                range.start,
+
+              schedule,
+
+              holiday,
+
+              attendance:
+                toEngineAttendance(
+                  attendance,
+                ),
+
+              now,
+            });
+
+          const leave =
+            normalizedLeaves.find(
+              (item) =>
+                isLeaveForDate(
+                  item,
+                  dateKey,
+                ),
+            ) ?? null;
+
+          const isLeave =
+            Boolean(
+              leave &&
+                !attendance &&
+                rawCalculation.isWorkingDay &&
+                !rawCalculation.isHoliday &&
+                !rawCalculation.isFuture,
+            );
+
+          const calculation =
+            isLeave
+              ? createLeaveCalculation(
+                  rawCalculation,
+                )
+              : rawCalculation;
+
+          return {
+            id:
+              attendance?.id ??
+              `virtual-${employee.id}-${dateKey}`,
+
             workDate:
               range.start,
-            schedule,
-            holiday,
-            attendance:
-              engineAttendance,
-          });
 
-        return {
-          id:
-            attendance?.id ??
-            `virtual-${employee.id}-${dateKey}`,
+            attendance,
 
-          workDate:
-            range.start,
+            calculation,
 
-          attendance,
+            temporaryExits:
+              isLeave
+                ? []
+                : attendance
+                    ?.temporaryExits ??
+                  [],
 
-          calculation,
-        };
-      })
+            leave:
+              isLeave
+                ? leave
+                : null,
+          };
+        },
+      )
       .filter(
         (
           item,
@@ -525,7 +899,9 @@ export default async function EmployeeAttendancePage({
 
   const attendanceDays =
     days.filter(
-      ({ calculation }) =>
+      ({
+        calculation,
+      }) =>
         calculation.state ===
           "PRESENT" ||
         calculation.state ===
@@ -534,7 +910,9 @@ export default async function EmployeeAttendancePage({
 
   const completedDays =
     days.filter(
-      ({ calculation }) =>
+      ({
+        calculation,
+      }) =>
         Boolean(
           calculation.checkIn &&
             calculation.checkOut,
@@ -543,37 +921,56 @@ export default async function EmployeeAttendancePage({
 
   const workingDays =
     days.filter(
-      ({ calculation }) =>
+      ({
+        calculation,
+      }) =>
         calculation.state ===
         "WORKING",
     ).length;
 
   const absentDays =
     days.filter(
-      ({ calculation }) =>
+      ({
+        calculation,
+      }) =>
         calculation.state ===
         "ABSENT",
     ).length;
 
   const holidayDays =
     days.filter(
-      ({ calculation }) =>
+      ({
+        calculation,
+      }) =>
         calculation.state ===
         "HOLIDAY",
     ).length;
 
   const nonWorkingDays =
     days.filter(
-      ({ calculation }) =>
+      ({
+        calculation,
+      }) =>
         calculation.state ===
         "NON_WORKING",
     ).length;
 
   const futureDays =
     days.filter(
-      ({ calculation }) =>
+      ({
+        calculation,
+      }) =>
         calculation.state ===
         "FUTURE",
+    ).length;
+
+  const leaveDays =
+    days.filter(
+      ({
+        calculation,
+      }) =>
+        calculation.state ===
+        "LEAVE",
     ).length;
 
   const totalWorkedMinutes =
@@ -660,9 +1057,68 @@ export default async function EmployeeAttendancePage({
       0,
     );
 
+  const totalTemporaryExitMinutes =
+    days.reduce(
+      (
+        total,
+        day,
+      ) =>
+        total +
+        day.calculation
+          .temporaryExitMinutes,
+      0,
+    );
+
+  const totalMissionMinutes =
+    days.reduce(
+      (
+        total,
+        day,
+      ) => {
+        const mission =
+          day.temporaryExits
+            .filter(
+              (exit) =>
+                exit.type ===
+                "MISSION",
+            )
+            .reduce(
+              (
+                sum,
+                exit,
+              ) =>
+                sum +
+                getExitDurationMinutes(
+                  exit,
+                  now,
+                ),
+              0,
+            );
+
+        return (
+          total + mission
+        );
+      },
+      0,
+    );
+
+  const totalTemporaryExitCount =
+    days.reduce(
+      (
+        total,
+        day,
+      ) =>
+        total +
+        day.temporaryExits
+          .length,
+      0,
+    );
+
   const workedDays =
     days.filter(
-      ({ calculation }) =>
+      ({
+        calculation,
+      }) =>
         calculation.workedMinutes >
         0,
     );
@@ -675,10 +1131,12 @@ export default async function EmployeeAttendancePage({
         )
       : 0;
 
-  const firstCheckIns =
+  const firstCheckInValues =
     days
       .map(
-        ({ calculation }) =>
+        ({
+          calculation,
+        }) =>
           calculation.checkIn,
       )
       .filter(
@@ -688,10 +1146,12 @@ export default async function EmployeeAttendancePage({
           value !== null,
       );
 
-  const lastCheckOuts =
+  const lastCheckOutValues =
     days
       .map(
-        ({ calculation }) =>
+        ({
+          calculation,
+        }) =>
           calculation.checkOut,
       )
       .filter(
@@ -701,33 +1161,33 @@ export default async function EmployeeAttendancePage({
           value !== null,
       );
 
-  let firstCheckIn:
-    | Date
-    | null = null;
+  const firstCheckIn =
+    firstCheckInValues.length > 0
+      ? firstCheckInValues.reduce(
+          (
+            first,
+            current,
+          ) =>
+            current.getTime() <
+            first.getTime()
+              ? current
+              : first,
+        )
+      : null;
 
-  for (const date of firstCheckIns) {
-    if (
-      !firstCheckIn ||
-      date.getTime() <
-        firstCheckIn.getTime()
-    ) {
-      firstCheckIn = date;
-    }
-  }
-
-  let lastCheckOut:
-    | Date
-    | null = null;
-
-  for (const date of lastCheckOuts) {
-    if (
-      !lastCheckOut ||
-      date.getTime() >
-        lastCheckOut.getTime()
-    ) {
-      lastCheckOut = date;
-    }
-  }
+  const lastCheckOut =
+    lastCheckOutValues.length > 0
+      ? lastCheckOutValues.reduce(
+          (
+            last,
+            current,
+          ) =>
+            current.getTime() >
+            last.getTime()
+              ? current
+              : last,
+        )
+      : null;
 
   return (
     <AdminShell
@@ -749,6 +1209,7 @@ export default async function EmployeeAttendancePage({
           <ArrowRight
             size={16}
           />
+
           بازگشت به حضور و غیاب
         </Link>
 
@@ -764,6 +1225,7 @@ export default async function EmployeeAttendancePage({
               >
                 {employee.firstName?.[0] ??
                   ""}
+
                 {employee.lastName?.[0] ??
                   ""}
               </div>
@@ -798,7 +1260,9 @@ export default async function EmployeeAttendancePage({
 
                 {employee.phone ? (
                   <p className="mt-1 text-xs text-slate-400">
-                    {employee.phone}
+                    {
+                      employee.phone
+                    }
                   </p>
                 ) : null}
               </div>
@@ -811,9 +1275,7 @@ export default async function EmployeeAttendancePage({
 
               <p className="mt-1 text-sm font-bold text-slate-900">
                 {formatDate(
-                  getDateRange(
-                    monthRange.monthStartKey,
-                  )!.start,
+                  monthRange.start,
                 )}
               </p>
             </div>
@@ -823,28 +1285,36 @@ export default async function EmployeeAttendancePage({
         <section className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <InfoCard
             label="روزهای حضور"
-            value={`${attendanceDays} روز`}
+            value={`${attendanceDays.toLocaleString(
+              "fa-IR",
+            )} روز`}
             icon={UserCheck}
             valueClass="text-emerald-600"
           />
 
           <InfoCard
             label="داخل شرکت"
-            value={`${workingDays} روز`}
+            value={`${workingDays.toLocaleString(
+              "fa-IR",
+            )} روز`}
             icon={Clock3}
             valueClass="text-blue-600"
           />
 
           <InfoCard
             label="غیبت"
-            value={`${absentDays} روز`}
+            value={`${absentDays.toLocaleString(
+              "fa-IR",
+            )} روز`}
             icon={UserX}
             valueClass="text-rose-600"
           />
 
           <InfoCard
             label="روزهای کامل"
-            value={`${completedDays} روز`}
+            value={`${completedDays.toLocaleString(
+              "fa-IR",
+            )} روز`}
             icon={CheckCircle2}
           />
         </section>
@@ -935,6 +1405,43 @@ export default async function EmployeeAttendancePage({
           />
         </section>
 
+        <section className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <InfoCard
+            label="خروج موقت"
+            value={formatMinutes(
+              totalTemporaryExitMinutes,
+            )}
+            icon={ArrowRightLeft}
+            valueClass="text-amber-600"
+          />
+
+          <InfoCard
+            label="مأموریت"
+            value={formatMinutes(
+              totalMissionMinutes,
+            )}
+            icon={BriefcaseBusiness}
+            valueClass="text-blue-600"
+          />
+
+          <InfoCard
+            label="تعداد خروج"
+            value={`${totalTemporaryExitCount.toLocaleString(
+              "fa-IR",
+            )} مورد`}
+            icon={ArrowRightLeft}
+          />
+
+          <InfoCard
+            label="مرخصی"
+            value={`${leaveDays.toLocaleString(
+              "fa-IR",
+            )} روز`}
+            icon={CalendarDays}
+            valueClass="text-violet-600"
+          />
+        </section>
+
         <section className="mt-4 grid gap-3 sm:grid-cols-2">
           <InfoCard
             label="اولین ورود"
@@ -970,7 +1477,7 @@ export default async function EmployeeAttendancePage({
                 </h2>
 
                 <p className="mt-1 text-xs leading-5 text-slate-400">
-                  وضعیت هر روز بر اساس برنامه کاری، تعطیلات و رکورد حضور محاسبه شده است.
+                  حضور، خروج موقت، مأموریت، مرخصی و وضعیت هر روز.
                 </p>
               </div>
 
@@ -995,13 +1502,30 @@ export default async function EmployeeAttendancePage({
             </div>
           ) : (
             <>
-              <div className="hidden border-b border-slate-100 bg-slate-50/50 px-6 py-3 text-[11px] font-semibold text-slate-400 md:grid md:grid-cols-[150px_110px_110px_minmax(170px,1fr)_140px_120px] md:items-center md:gap-4">
-                <span>تاریخ</span>
-                <span>ورود</span>
-                <span>خروج</span>
-                <span>کارکرد</span>
-                <span>وضعیت</span>
-                <span>تراز</span>
+              <div className="hidden border-b border-slate-100 bg-slate-50/50 px-6 py-3 text-[11px] font-semibold text-slate-400 md:grid md:grid-cols-[150px_110px_110px_minmax(170px,1fr)_180px_120px] md:items-center md:gap-4">
+                <span>
+                  تاریخ
+                </span>
+
+                <span>
+                  ورود
+                </span>
+
+                <span>
+                  خروج
+                </span>
+
+                <span>
+                  کارکرد
+                </span>
+
+                <span>
+                  وضعیت / خروج
+                </span>
+
+                <span>
+                  تراز
+                </span>
               </div>
 
               <div className="divide-y divide-slate-100">
@@ -1013,14 +1537,34 @@ export default async function EmployeeAttendancePage({
                           .state,
                       );
 
+                    const exitMinutes =
+                      day.temporaryExits.reduce(
+                        (
+                          total,
+                          exit,
+                        ) =>
+                          total +
+                          getExitDurationMinutes(
+                            exit,
+                            now,
+                          ),
+                        0,
+                      );
+
                     return (
                       <div
                         key={
                           day.id
                         }
-                        className="px-5 py-4 sm:px-6"
+                        className={`px-5 py-4 sm:px-6 ${
+                          day.calculation
+                            .state ===
+                          "LEAVE"
+                            ? "bg-violet-50/20"
+                            : ""
+                        }`}
                       >
-                        <div className="grid gap-4 md:grid-cols-[150px_110px_110px_minmax(170px,1fr)_140px_120px] md:items-center md:gap-4">
+                        <div className="grid gap-4 md:grid-cols-[150px_110px_110px_minmax(170px,1fr)_180px_120px] md:items-start md:gap-4">
                           <div>
                             <p className="text-sm font-bold text-slate-900">
                               {formatShortDate(
@@ -1046,10 +1590,14 @@ export default async function EmployeeAttendancePage({
                                 className="ml-1 inline"
                               />
 
-                              {formatTime(
-                                day.calculation
-                                  .checkIn,
-                              )}
+                              {day.calculation
+                                .state ===
+                              "LEAVE"
+                                ? "—"
+                                : formatTime(
+                                    day.calculation
+                                      .checkIn,
+                                  )}
                             </p>
                           </div>
 
@@ -1064,10 +1612,14 @@ export default async function EmployeeAttendancePage({
                                 className="ml-1 inline"
                               />
 
-                              {formatTime(
-                                day.calculation
-                                  .checkOut,
-                              )}
+                              {day.calculation
+                                .state ===
+                              "LEAVE"
+                                ? "—"
+                                : formatTime(
+                                    day.calculation
+                                      .checkOut,
+                                  )}
                             </p>
                           </div>
 
@@ -1077,10 +1629,14 @@ export default async function EmployeeAttendancePage({
                             </p>
 
                             <p className="mt-1 text-sm font-bold text-slate-900 md:mt-0">
-                              {formatMinutes(
-                                day.calculation
-                                  .workedMinutes,
-                              )}
+                              {day.calculation
+                                .state ===
+                              "LEAVE"
+                                ? "مرخصی"
+                                : formatMinutes(
+                                    day.calculation
+                                      .workedMinutes,
+                                  )}
                             </p>
 
                             {day.calculation
@@ -1152,7 +1708,130 @@ export default async function EmployeeAttendancePage({
                                   }
                                 </span>
                               ) : null}
+
+                              {day.leave ? (
+                                <span className="inline-flex rounded-full bg-violet-50 px-2.5 py-1.5 text-[10px] font-semibold text-violet-700">
+                                  {getLeaveTypeLabel(
+                                    day.leave.type,
+                                  )}
+                                </span>
+                              ) : null}
                             </div>
+
+                            {day.leave?.reason ? (
+                              <div className="mt-2 rounded-2xl bg-violet-50/60 px-3 py-2">
+                                <p className="text-[10px] font-semibold text-violet-700">
+                                  دلیل مرخصی
+                                </p>
+
+                                <p className="mt-1 text-[10px] leading-5 text-slate-500">
+                                  {
+                                    day.leave
+                                      .reason
+                                  }
+                                </p>
+                              </div>
+                            ) : null}
+
+                            {day.temporaryExits
+                              .length >
+                            0 ? (
+                              <div className="mt-3 space-y-2">
+                                {day.temporaryExits.map(
+                                  (
+                                    exit,
+                                  ) => {
+                                    const ExitIcon =
+                                      getTemporaryExitIcon(
+                                        exit.type,
+                                      );
+
+                                    const duration =
+                                      getExitDurationMinutes(
+                                        exit,
+                                        now,
+                                      );
+
+                                    return (
+                                      <div
+                                        key={
+                                          exit.id
+                                        }
+                                        className={`rounded-2xl px-3 py-2 ${
+                                          exit.type ===
+                                          "MISSION"
+                                            ? "bg-blue-50"
+                                            : "bg-amber-50"
+                                        }`}
+                                      >
+                                        <div className="flex items-center justify-between gap-2">
+                                          <div className="flex min-w-0 items-center gap-2">
+                                            <ExitIcon
+                                              size={14}
+                                              className={
+                                                exit.type ===
+                                                "MISSION"
+                                                  ? "text-blue-600"
+                                                  : "text-amber-600"
+                                              }
+                                            />
+
+                                            <span
+                                              className={
+                                                exit.type ===
+                                                "MISSION"
+                                                  ? "text-[10px] font-bold text-blue-700"
+                                                  : "text-[10px] font-bold text-amber-700"
+                                              }
+                                            >
+                                              {getTemporaryExitLabel(
+                                                exit.type,
+                                              )}
+                                            </span>
+                                          </div>
+
+                                          <span className="shrink-0 text-[10px] font-semibold text-slate-500">
+                                            {formatMinutes(
+                                              duration,
+                                            )}
+                                          </span>
+                                        </div>
+
+                                        <p className="mt-1 text-[9px] text-slate-400">
+                                          {formatTime(
+                                            exit.startedAt,
+                                          )}{" "}
+                                          تا{" "}
+                                          {exit.endedAt
+                                            ? formatTime(
+                                                exit.endedAt,
+                                              )
+                                            : "فعال"}
+                                        </p>
+
+                                        {exit.reason ? (
+                                          <p className="mt-2 text-[10px] leading-5 text-slate-500">
+                                            {
+                                              exit.reason
+                                            }
+                                          </p>
+                                        ) : null}
+                                      </div>
+                                    );
+                                  },
+                                )}
+
+                                {exitMinutes >
+                                0 ? (
+                                  <p className="text-[10px] font-semibold text-slate-500">
+                                    مجموع خروج:{" "}
+                                    {formatMinutes(
+                                      exitMinutes,
+                                    )}
+                                  </p>
+                                ) : null}
+                              </div>
+                            ) : null}
                           </div>
 
                           <div>
@@ -1199,6 +1878,18 @@ export default async function EmployeeAttendancePage({
                                 {formatMinutes(
                                   day.calculation
                                     .underworkMinutes,
+                                )}
+                              </p>
+                            ) : null}
+
+                            {day.calculation
+                              .temporaryExitMinutes >
+                            0 ? (
+                              <p className="mt-1 text-[10px] text-amber-600">
+                                خروج:{" "}
+                                {formatMinutes(
+                                  day.calculation
+                                    .temporaryExitMinutes,
                                 )}
                               </p>
                             ) : null}
@@ -1255,9 +1946,7 @@ function InfoCard({
         </div>
 
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-50 text-slate-500">
-          <Icon
-            size={17}
-          />
+          <Icon size={17} />
         </div>
       </div>
     </div>

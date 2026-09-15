@@ -3,25 +3,84 @@
 :root {
   --background: #f6f7f9;
   --foreground: #0f172a;
+
+  --surface: #ffffff;
+  --surface-subtle: #f8fafc;
+
+  --border: #e2e8f0;
+  --border-subtle: #eef2f7;
+
+  --muted: #64748b;
+  --muted-soft: #94a3b8;
+
+  --primary: #0f172a;
+  --primary-soft: #f1f5f9;
+
+  --success: #059669;
+  --success-soft: #ecfdf5;
+
+  --info: #2563eb;
+  --info-soft: #eff6ff;
+
+  --warning: #d97706;
+  --warning-soft: #fffbeb;
+
+  --danger: #e11d48;
+  --danger-soft: #fff1f2;
+
+  --radius-sm: 0.75rem;
+  --radius-md: 1rem;
+  --radius-lg: 1.25rem;
+  --radius-xl: 1.5rem;
+  --radius-2xl: 1.75rem;
+
+  --shadow-card:
+    0 8px 30px rgba(15, 23, 42, 0.04);
+
+  --shadow-card-hover:
+    0 15px 40px rgba(15, 23, 42, 0.07);
+
+  --focus-ring:
+    0 0 0 4px rgba(15, 23, 42, 0.08);
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
 html {
   direction: rtl;
   scroll-behavior: smooth;
+  background: var(--background);
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
+  min-height: 100vh;
   margin: 0;
+
+  overflow-x: hidden;
+
   background: var(--background);
   color: var(--foreground);
-  font-family: "Vazirmatn Variable", sans-serif;
+
+  font-family:
+    "Vazirmatn Variable",
+    Vazirmatn,
+    sans-serif;
+
   font-feature-settings:
     "ss01" 1,
     "cv01" 1;
+
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  -webkit-tap-highlight-color: transparent;
 }
 
 button,
@@ -31,10 +90,407 @@ select {
   font: inherit;
 }
 
+button,
+a,
+input,
+textarea,
+select {
+  -webkit-tap-highlight-color: transparent;
+}
+
 button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+img,
+svg,
+video,
+canvas {
+  display: block;
+  max-width: 100%;
+}
+
+img {
+  height: auto;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #94a3b8;
+  opacity: 1;
+}
+
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/*
+ * Dark controls
+ *
+ * رنگ‌های تیره‌ای که در پروژه برای
+ * Primary buttons / links استفاده می‌کنیم.
+ *
+ * متن خود عنصر، فرزندان و SVGها سفید
+ * می‌ماند تا کلاس‌های محلی نتوانند
+ * خوانایی را خراب کنند.
+ */
+:where(
+  button,
+  a
+)[class~="bg-black"],
+:where(
+  button,
+  a
+)[class~="bg-zinc-950"],
+:where(
+  button,
+  a
+)[class~="bg-zinc-900"],
+:where(
+  button,
+  a
+)[class~="bg-zinc-800"],
+:where(
+  button,
+  a
+)[class~="bg-neutral-950"],
+:where(
+  button,
+  a
+)[class~="bg-neutral-900"],
+:where(
+  button,
+  a
+)[class~="bg-neutral-800"],
+:where(
+  button,
+  a
+)[class~="bg-gray-950"],
+:where(
+  button,
+  a
+)[class~="bg-gray-900"],
+:where(
+  button,
+  a
+)[class~="bg-gray-800"],
+:where(
+  button,
+  a
+)[class~="bg-slate-950"],
+:where(
+  button,
+  a
+)[class~="bg-slate-900"],
+:where(
+  button,
+  a
+)[class~="bg-slate-800"] {
+  color: #ffffff !important;
+}
+
+:where(
+  button,
+  a
+)[class~="bg-black"] *,
+:where(
+  button,
+  a
+)[class~="bg-zinc-950"] *,
+:where(
+  button,
+  a
+)[class~="bg-zinc-900"] *,
+:where(
+  button,
+  a
+)[class~="bg-zinc-800"] *,
+:where(
+  button,
+  a
+)[class~="bg-neutral-950"] *,
+:where(
+  button,
+  a
+)[class~="bg-neutral-900"] *,
+:where(
+  button,
+  a
+)[class~="bg-neutral-800"] *,
+:where(
+  button,
+  a
+)[class~="bg-gray-950"] *,
+:where(
+  button,
+  a
+)[class~="bg-gray-900"] *,
+:where(
+  button,
+  a
+)[class~="bg-gray-800"] *,
+:where(
+  button,
+  a
+)[class~="bg-slate-950"] *,
+:where(
+  button,
+  a
+)[class~="bg-slate-900"] *,
+:where(
+  button,
+  a
+)[class~="bg-slate-800"] * {
+  color: #ffffff !important;
+}
+
+:where(
+  button,
+  a
+)[class~="bg-black"] svg,
+:where(
+  button,
+  a
+)[class~="bg-zinc-950"] svg,
+:where(
+  button,
+  a
+)[class~="bg-zinc-900"] svg,
+:where(
+  button,
+  a
+)[class~="bg-zinc-800"] svg,
+:where(
+  button,
+  a
+)[class~="bg-neutral-950"] svg,
+:where(
+  button,
+  a
+)[class~="bg-neutral-900"] svg,
+:where(
+  button,
+  a
+)[class~="bg-neutral-800"] svg,
+:where(
+  button,
+  a
+)[class~="bg-gray-950"] svg,
+:where(
+  button,
+  a
+)[class~="bg-gray-900"] svg,
+:where(
+  button,
+  a
+)[class~="bg-gray-800"] svg,
+:where(
+  button,
+  a
+)[class~="bg-slate-950"] svg,
+:where(
+  button,
+  a
+)[class~="bg-slate-900"] svg,
+:where(
+  button,
+  a
+)[class~="bg-slate-800"] svg {
+  color: #ffffff !important;
+  stroke: currentColor !important;
+}
+
+/*
+ * Disabled
+ */
+:where(
+  button,
+  a
+)[class~="bg-black"]:disabled,
+:where(
+  button,
+  a
+)[class~="bg-zinc-950"]:disabled,
+:where(
+  button,
+  a
+)[class~="bg-zinc-900"]:disabled,
+:where(
+  button,
+  a
+)[class~="bg-zinc-800"]:disabled,
+:where(
+  button,
+  a
+)[class~="bg-neutral-950"]:disabled,
+:where(
+  button,
+  a
+)[class~="bg-neutral-900"]:disabled,
+:where(
+  button,
+  a
+)[class~="bg-neutral-800"]:disabled,
+:where(
+  button,
+  a
+)[class~="bg-gray-950"]:disabled,
+:where(
+  button,
+  a
+)[class~="bg-gray-900"]:disabled,
+:where(
+  button,
+  a
+)[class~="bg-gray-800"]:disabled,
+:where(
+  button,
+  a
+)[class~="bg-slate-950"]:disabled,
+:where(
+  button,
+  a
+)[class~="bg-slate-900"]:disabled,
+:where(
+  button,
+  a
+)[class~="bg-slate-800"]:disabled {
+  color: #ffffff !important;
+}
+
 ::selection {
   background: rgb(15 23 42 / 0.12);
+  color: var(--foreground);
+}
+
+/*
+ * Scrollbar
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+  background-color: #cbd5e1;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: #94a3b8;
+}
+
+/*
+ * Forms
+ */
+input,
+textarea,
+select {
+  color: var(--foreground);
+}
+
+textarea {
+  resize: vertical;
+}
+
+/*
+ * جلوگیری از بیرون‌زدگی متن
+ */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p {
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Safe area
+ */
+.safe-area-bottom {
+  padding-bottom: env(
+    safe-area-inset-bottom
+  );
+}
+
+.safe-area-top {
+  padding-top: env(
+    safe-area-inset-top
+  );
+}
+
+/*
+ * Reduced motion
+ */
+@media (
+  prefers-reduced-motion: reduce
+) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/*
+ * Mobile
+ */
+@media (max-width: 640px) {
+  body {
+    min-width: 0;
+  }
+}
+
+/*
+ * Print
+ */
+@media print {
+  html,
+  body {
+    background: #ffffff;
+  }
+
+  body {
+    color: #000000;
+  }
+
+  button,
+  nav,
+  aside {
+    display: none !important;
+  }
 }
