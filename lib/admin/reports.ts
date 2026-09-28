@@ -195,22 +195,50 @@ function addCalendarDays(
   dateKey: string,
   amount: number,
 ): string | null {
-  const range =
-    getDateRange(
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})$/.exec(
       dateKey,
     );
 
-  if (!range) {
+  if (!match) {
     return null;
   }
 
+  const year =
+    Number(match[1]);
+
+  const month =
+    Number(match[2]);
+
+  const day =
+    Number(match[3]);
+
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    !Number.isInteger(day) ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31
+  ) {
+    return null;
+  }
+
+  /*
+   * برای محاسبه روز تقویمی، مستقیماً از
+   * خود dateKey استفاده می‌کنیم.
+   *
+   * ساعت 12:00 UTC عمداً انتخاب شده تا
+   * تبدیل timezone باعث افتادن تاریخ روی
+   * روز قبل نشود.
+   */
   const probe =
     new Date(
       Date.UTC(
-        range.start.getUTCFullYear(),
-        range.start.getUTCMonth(),
-        range.start.getUTCDate() +
-          amount,
+        year,
+        month - 1,
+        day + amount,
         12,
         0,
         0,

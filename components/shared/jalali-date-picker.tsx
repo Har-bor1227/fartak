@@ -7,11 +7,14 @@ import {
   X,
 } from "lucide-react";
 import {
+  isLeapJalaaliYear,
   toGregorian,
   toJalaali,
 } from "jalaali-js";
 import {
+  useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -135,22 +138,9 @@ function getMonthDays(
     return 30;
   }
 
-  const nextYear =
-    toGregorian(
-      year,
-      12,
-      30,
-    );
-
-  if (
-    nextYear.gy === year &&
-    nextYear.gm === 12 &&
-    nextYear.gd === 30
-  ) {
-    return 30;
-  }
-
-  return 29;
+  return isLeapJalaaliYear(year)
+    ? 30
+    : 29;
 }
 
 function getWeekdayIndex(
@@ -217,6 +207,11 @@ export default function JalaliDatePicker({
   max,
   name,
 }: JalaliDatePickerProps) {
+  const containerRef =
+    useRef<HTMLDivElement | null>(
+      null,
+    );
+
   const initialDate = useMemo(
     () => getInitialDate(value),
     [value],
@@ -246,6 +241,75 @@ export default function JalaliDatePicker({
 
   const [viewMonth, setViewMonth] =
     useState(initialDate.jm);
+
+  useEffect(() => {
+    const nextDate =
+      getInitialDate(value);
+
+    setViewYear(
+      nextDate.jy,
+    );
+
+    setViewMonth(
+      nextDate.jm,
+    );
+  }, [value]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function handlePointerDown(
+      event: PointerEvent,
+    ) {
+      const target =
+        event.target;
+
+      if (
+        target instanceof Node &&
+        containerRef.current?.contains(
+          target,
+        )
+      ) {
+        return;
+      }
+
+      setOpen(false);
+    }
+
+    function handleKeyDown(
+      event: KeyboardEvent,
+    ) {
+      if (
+        event.key === "Escape"
+      ) {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener(
+      "pointerdown",
+      handlePointerDown,
+    );
+
+    document.addEventListener(
+      "keydown",
+      handleKeyDown,
+    );
+
+    return () => {
+      document.removeEventListener(
+        "pointerdown",
+        handlePointerDown,
+      );
+
+      document.removeEventListener(
+        "keydown",
+        handleKeyDown,
+      );
+    };
+  }, [open]);
 
   const monthDays =
     getMonthDays(
@@ -287,10 +351,12 @@ export default function JalaliDatePicker({
   function previousMonth() {
     if (viewMonth === 1) {
       setViewMonth(12);
+
       setViewYear(
         (current) =>
           current - 1,
       );
+
       return;
     }
 
@@ -303,10 +369,12 @@ export default function JalaliDatePicker({
   function nextMonth() {
     if (viewMonth === 12) {
       setViewMonth(1);
+
       setViewYear(
         (current) =>
           current + 1,
       );
+
       return;
     }
 
@@ -351,10 +419,16 @@ export default function JalaliDatePicker({
         window.location.href,
       );
 
-    url.searchParams.set(
-      fieldName,
-      fieldValue,
-    );
+    if (fieldValue) {
+      url.searchParams.set(
+        fieldName,
+        fieldValue,
+      );
+    } else {
+      url.searchParams.delete(
+        fieldName,
+      );
+    }
 
     window.location.href =
       url.toString();
@@ -403,17 +477,10 @@ export default function JalaliDatePicker({
       return;
     }
 
-    const url =
-      new URL(
-        window.location.href,
-      );
-
-    url.searchParams.delete(
+    updateUrl(
       name,
+      "",
     );
-
-    window.location.href =
-      url.toString();
   }
 
   function selectToday() {
@@ -424,7 +491,9 @@ export default function JalaliDatePicker({
         jd: today.jd,
       });
 
-    if (isDisabled(isoToday)) {
+    if (
+      isDisabled(isoToday)
+    ) {
       return;
     }
 
@@ -458,6 +527,7 @@ export default function JalaliDatePicker({
 
   return (
     <div
+      ref={containerRef}
       className="relative"
       dir="rtl"
     >
@@ -493,6 +563,7 @@ export default function JalaliDatePicker({
           focus:ring-slate-900/5
         "
         aria-expanded={open}
+        aria-haspopup="dialog"
       >
         <CalendarDays
           size={17}
@@ -546,231 +617,221 @@ export default function JalaliDatePicker({
       </button>
 
       {open ? (
-        <>
-          <button
-            type="button"
-            aria-label="بستن تقویم"
-            onClick={() =>
-              setOpen(false)
-            }
-            className="
-              fixed inset-0
-              z-30
-              cursor-default
-            "
-          />
+        <div
+          className="
+            absolute
+            right-0
+            top-[calc(100%+8px)]
+            z-40
+            w-full
+            min-w-[290px]
+            overflow-hidden
+            rounded-[24px]
+            border border-slate-200
+            bg-white
+            p-4
+            shadow-[0_20px_60px_rgba(15,23,42,0.14)]
+          "
+          role="dialog"
+          aria-label="انتخاب تاریخ"
+        >
+          <div className="flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={nextMonth}
+              className="
+                flex h-9 w-9
+                items-center
+                justify-center
+                rounded-xl
+                text-slate-400
+                transition
+                hover:bg-slate-100
+                hover:text-slate-800
+              "
+              aria-label="ماه بعد"
+            >
+              <ChevronRight
+                size={18}
+              />
+            </button>
 
-          <div
-            className="
-              absolute
-              right-0
-              top-[calc(100%+8px)]
-              z-40
-              w-full
-              min-w-[290px]
-              overflow-hidden
-              rounded-[24px]
-              border border-slate-200
-              bg-white
-              p-4
-              shadow-[0_20px_60px_rgba(15,23,42,0.14)]
-            "
-          >
-            <div className="flex items-center justify-between gap-3">
-              <button
-                type="button"
-                onClick={nextMonth}
-                className="
-                  flex h-9 w-9
-                  items-center
-                  justify-center
-                  rounded-xl
-                  text-slate-400
-                  transition
-                  hover:bg-slate-100
-                  hover:text-slate-800
-                "
-                aria-label="ماه بعد"
-              >
-                <ChevronRight
-                  size={18}
-                />
-              </button>
+            <div className="text-center">
+              <p className="text-sm font-bold text-slate-950">
+                {MONTHS[
+                  viewMonth - 1
+                ]}
+              </p>
 
-              <div className="text-center">
-                <p className="text-sm font-bold text-slate-950">
-                  {MONTHS[
-                    viewMonth - 1
-                  ]}
-                </p>
-
-                <p className="mt-0.5 text-xs font-medium text-slate-400">
-                  {toPersianDigits(
-                    viewYear,
-                  )}
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={
-                  previousMonth
-                }
-                className="
-                  flex h-9 w-9
-                  items-center
-                  justify-center
-                  rounded-xl
-                  text-slate-400
-                  transition
-                  hover:bg-slate-100
-                  hover:text-slate-800
-                "
-                aria-label="ماه قبل"
-              >
-                <ChevronLeft
-                  size={18}
-                />
-              </button>
+              <p className="mt-0.5 text-xs font-medium text-slate-400">
+                {toPersianDigits(
+                  viewYear,
+                )}
+              </p>
             </div>
 
-            <div className="mt-4 grid grid-cols-7 gap-1">
-              {WEEK_DAYS.map(
-                (day) => (
-                  <div
-                    key={day}
-                    className="
-                      flex h-8
-                      items-center
-                      justify-center
-                      text-[10px]
-                      font-semibold
-                      text-slate-400
-                    "
-                  >
-                    {day}
-                  </div>
-                ),
-              )}
-
-              {cells.map(
-                (
-                  day,
-                  index,
-                ) => {
-                  if (
-                    day === null
-                  ) {
-                    return (
-                      <div
-                        key={`empty-${index}`}
-                        className="h-10"
-                      />
-                    );
-                  }
-
-                  const iso =
-                    jalaliToIso({
-                      jy: viewYear,
-                      jm: viewMonth,
-                      jd: day,
-                    });
-
-                  const selectedDay =
-                    value === iso;
-
-                  const todayDay =
-                    today.jy ===
-                      viewYear &&
-                    today.jm ===
-                      viewMonth &&
-                    today.jd ===
-                      day;
-
-                  const disabled =
-                    isDisabled(
-                      iso,
-                    );
-
-                  let dayClass =
-                    "flex h-10 items-center justify-center rounded-xl text-xs font-semibold transition";
-
-                  if (disabled) {
-                    dayClass +=
-                      " cursor-not-allowed text-slate-200";
-                  } else if (
-                    selectedDay
-                  ) {
-                    dayClass +=
-                      " bg-slate-950 text-white";
-                  } else if (
-                    todayDay
-                  ) {
-                    dayClass +=
-                      " bg-blue-50 text-blue-700";
-                  } else {
-                    dayClass +=
-                      " text-slate-700 hover:bg-slate-100";
-                  }
-
-                  return (
-                    <button
-                      key={day}
-                      type="button"
-                      disabled={disabled}
-                      onClick={() =>
-                        selectDay(
-                          day,
-                        )
-                      }
-                      className={
-                        dayClass
-                      }
-                    >
-                      {toPersianDigits(
-                        day,
-                      )}
-                    </button>
-                  );
-                },
-              )}
-            </div>
-
-            <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3">
-              <button
-                type="button"
-                onClick={
-                  selectToday
-                }
-                className="
-                  text-xs
-                  font-semibold
-                  text-blue-600
-                  transition
-                  hover:text-blue-700
-                "
-              >
-                امروز
-              </button>
-
-              <button
-                type="button"
-                onClick={
-                  clearDate
-                }
-                className="
-                  text-xs
-                  font-semibold
-                  text-slate-400
-                  transition
-                  hover:text-slate-700
-                "
-              >
-                پاک کردن
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={
+                previousMonth
+              }
+              className="
+                flex h-9 w-9
+                items-center
+                justify-center
+                rounded-xl
+                text-slate-400
+                transition
+                hover:bg-slate-100
+                hover:text-slate-800
+              "
+              aria-label="ماه قبل"
+            >
+              <ChevronLeft
+                size={18}
+              />
+            </button>
           </div>
-        </>
+
+          <div className="mt-4 grid grid-cols-7 gap-1">
+            {WEEK_DAYS.map(
+              (day) => (
+                <div
+                  key={day}
+                  className="
+                    flex h-8
+                    items-center
+                    justify-center
+                    text-[10px]
+                    font-semibold
+                    text-slate-400
+                  "
+                >
+                  {day}
+                </div>
+              ),
+            )}
+
+            {cells.map(
+              (
+                day,
+                index,
+              ) => {
+                if (
+                  day === null
+                ) {
+                  return (
+                    <div
+                      key={`empty-${index}`}
+                      className="h-10"
+                      aria-hidden="true"
+                    />
+                  );
+                }
+
+                const iso =
+                  jalaliToIso({
+                    jy: viewYear,
+                    jm: viewMonth,
+                    jd: day,
+                  });
+
+                const selectedDay =
+                  value === iso;
+
+                const todayDay =
+                  today.jy ===
+                    viewYear &&
+                  today.jm ===
+                    viewMonth &&
+                  today.jd ===
+                    day;
+
+                const disabled =
+                  isDisabled(
+                    iso,
+                  );
+
+                let dayClass =
+                  "flex h-10 items-center justify-center rounded-xl text-xs font-semibold transition";
+
+                if (
+                  disabled
+                ) {
+                  dayClass +=
+                    " cursor-not-allowed text-slate-200";
+                } else if (
+                  selectedDay
+                ) {
+                  dayClass +=
+                    " bg-slate-950 text-white";
+                } else if (
+                  todayDay
+                ) {
+                  dayClass +=
+                    " bg-blue-50 text-blue-700";
+                } else {
+                  dayClass +=
+                    " text-slate-700 hover:bg-slate-100";
+                }
+
+                return (
+                  <button
+                    key={day}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() =>
+                      selectDay(
+                        day,
+                      )
+                    }
+                    className={
+                      dayClass
+                    }
+                  >
+                    {toPersianDigits(
+                      day,
+                    )}
+                  </button>
+                );
+              },
+            )}
+          </div>
+
+          <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3">
+            <button
+              type="button"
+              onClick={
+                selectToday
+              }
+              className="
+                text-xs
+                font-semibold
+                text-blue-600
+                transition
+                hover:text-blue-700
+              "
+            >
+              امروز
+            </button>
+
+            <button
+              type="button"
+              onClick={
+                clearDate
+              }
+              className="
+                text-xs
+                font-semibold
+                text-slate-400
+                transition
+                hover:text-slate-700
+              "
+            >
+              پاک کردن
+            </button>
+          </div>
+        </div>
       ) : null}
     </div>
   );
