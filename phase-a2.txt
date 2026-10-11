@@ -1,0 +1,6149 @@
+
+============================================================
+FILE: lib\prisma.ts
+============================================================
+import { PrismaClient } from "@/app/generated/prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
+
+const globalForPrisma = globalThis as unknown as {
+  prisma?: PrismaClient;
+};
+
+function createPrismaClient() {
+  const connectionString = process.env.DATABASE_URL;
+
+  if (!connectionString) {
+    throw new Error("DATABASE_URL is not defined");
+  }
+
+  const adapter = new PrismaPg({
+    connectionString,
+  });
+
+  return new PrismaClient({
+    adapter,
+  });
+}
+
+export const prisma =
+  globalForPrisma.prisma ?? createPrismaClient();
+
+if (process.env.NODE_ENV !== "production") {
+  globalForPrisma.prisma = prisma;
+}
+============================================================
+FILE: lib\auth\session.ts
+============================================================
+import crypto from "node:crypto";
+import { cookies } from "next/headers";
+
+import { prisma } from "@/lib/prisma";
+
+const COOKIE_NAME =
+  process.env.SESSION_COOKIE_NAME || "attendance_session";
+
+const SESSION_DAYS = 7;
+
+function hashToken(token: string): string {
+  return crypto
+    .createHash("sha256")
+    .update(token)
+    .digest("hex");
+}
+
+function generateToken(): string {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+export async function createSession(userId: string) {
+  const token = generateToken();
+  const tokenHash = hashToken(token);
+
+  const expiresAt = new Date(
+    Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000,
+  );
+
+  await prisma.session.create({
+    data: {
+      userId,
+      tokenHash,
+      expiresAt,
+    },
+  });
+
+  const cookieStore = await cookies();
+
+  cookieStore.set({
+    name: COOKIE_NAME,
+    value: token,
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    expires: expiresAt,
+    path: "/",
+  });
+
+  return {
+    expiresAt,
+  };
+}
+
+export async function getCurrentSession() {
+  const cookieStore = await cookies();
+
+  const token = cookieStore.get(COOKIE_NAME)?.value;
+
+  if (!token) {
+    return null;
+  }
+
+  const tokenHash = hashToken(token);
+
+  const session = await prisma.session.findUnique({
+    where: {
+      tokenHash,
+    },
+    include: {
+      user: true,
+    },
+  });
+
+  if (!session) {
+    return null;
+  }
+
+  if (session.expiresAt <= new Date()) {
+    await prisma.session.delete({
+      where: {
+        id: session.id,
+      },
+    });
+
+    cookieStore.delete(COOKIE_NAME);
+
+    return null;
+  }
+
+  if (!session.user.isActive) {
+    await prisma.session.delete({
+      where: {
+        id: session.id,
+      },
+    });
+
+    cookieStore.delete(COOKIE_NAME);
+
+    return null;
+  }
+
+  return session;
+}
+
+export async function deleteCurrentSession() {
+  const cookieStore = await cookies();
+
+  const token = cookieStore.get(COOKIE_NAME)?.value;
+
+  if (token) {
+    const tokenHash = hashToken(token);
+
+    await prisma.session.deleteMany({
+      where: {
+        tokenHash,
+      },
+    });
+  }
+
+  cookieStore.delete(COOKIE_NAME);
+}
+============================================================
+FILE: lib\auth\current-user.ts
+============================================================
+import { redirect } from "next/navigation";
+
+import { getCurrentSession } from "@/lib/auth/session";
+
+export async function getCurrentUser() {
+  const session = await getCurrentSession();
+
+  if (!session) {
+    return null;
+  }
+
+  return session.user;
+}
+
+export async function requireUser() {
+  const user = await getCurrentUser();
+
+  if (!user) {
+    redirect("/login");
+  }
+
+  return user;
+}
+
+export async function requireAdmin() {
+  const user = await requireUser();
+
+  if (user.role !== "ADMIN") {
+    redirect("/employee");
+  }
+
+  return user;
+}
+
+export async function requireEmployee() {
+  const user = await requireUser();
+
+  if (user.role !== "EMPLOYEE") {
+    redirect("/admin");
+  }
+
+  return user;
+}
+============================================================
+FILE: lib\auth\password.ts
+============================================================
+import bcrypt from "bcryptjs";
+
+const SALT_ROUNDS = 12;
+
+export async function hashPassword(password: string): Promise<string> {
+  return bcrypt.hash(password, SALT_ROUNDS);
+}
+
+export async function verifyPassword(
+  password: string,
+  passwordHash: string,
+): Promise<boolean> {
+  return bcrypt.compare(password, passwordHash);
+}
+============================================================
+FILE: lib\date\tehran.ts
+============================================================
+const TIME_ZONE =
+  process.env.APP_TIMEZONE || "Asia/Tehran";
+
+type DateParts = {
+  year: number;
+  month: number;
+  day: number;
+};
+
+function getDateParts(date: Date): DateParts {
+  const formatter =
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: TIME_ZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+
+  const parts =
+    formatter.formatToParts(date);
+
+  return {
+    year: Number(
+      parts.find(
+        (part) => part.type === "year",
+      )?.value,
+    ),
+
+    month: Number(
+      parts.find(
+        (part) => part.type === "month",
+      )?.value,
+    ),
+
+    day: Number(
+      parts.find(
+        (part) => part.type === "day",
+      )?.value,
+    ),
+  };
+}
+
+function isValidDateParts(
+  parts: DateParts,
+): boolean {
+  if (
+    !Number.isInteger(parts.year) ||
+    !Number.isInteger(parts.month) ||
+    !Number.isInteger(parts.day)
+  ) {
+    return false;
+  }
+
+  if (
+    parts.month < 1 ||
+    parts.month > 12 ||
+    parts.day < 1 ||
+    parts.day > 31
+  ) {
+    return false;
+  }
+
+  /*
+   * Date.UTC به‌صورت خودکار تاریخ‌های
+   * نامعتبر مثل 2026-02-31 را normalize می‌کند.
+   *
+   * با مقایسه مجدد اجزای تاریخ، مطمئن
+   * می‌شویم تاریخ واقعاً در تقویم میلادی
+   * معتبر است.
+   */
+  const probe = new Date(
+    Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day,
+      12,
+      0,
+      0,
+      0,
+    ),
+  );
+
+  return (
+    probe.getUTCFullYear() ===
+      parts.year &&
+    probe.getUTCMonth() ===
+      parts.month - 1 &&
+    probe.getUTCDate() ===
+      parts.day
+  );
+}
+
+function addCalendarDays(
+  parts: DateParts,
+  amount: number,
+): DateParts {
+  const probe = new Date(
+    Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day + amount,
+      12,
+      0,
+      0,
+      0,
+    ),
+  );
+
+  return {
+    year:
+      probe.getUTCFullYear(),
+
+    month:
+      probe.getUTCMonth() + 1,
+
+    day:
+      probe.getUTCDate(),
+  };
+}
+
+function getTimeZoneOffsetMs(
+  date: Date,
+): number {
+  const formatter =
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: TIME_ZONE,
+      timeZoneName: "shortOffset",
+    });
+
+  const parts =
+    formatter.formatToParts(date);
+
+  const value =
+    parts.find(
+      (part) =>
+        part.type === "timeZoneName",
+    )?.value || "GMT";
+
+  if (
+    value === "GMT" ||
+    value === "UTC"
+  ) {
+    return 0;
+  }
+
+  const match =
+    value.match(
+      /^GMT([+-])(\d{1,2})(?::(\d{2}))?$/,
+    );
+
+  if (!match) {
+    return 0;
+  }
+
+  const sign =
+    match[1] === "+" ? 1 : -1;
+
+  const hours =
+    Number(match[2]);
+
+  const minutes =
+    Number(match[3] || 0);
+
+  return (
+    sign *
+    (hours * 60 + minutes) *
+    60 *
+    1000
+  );
+}
+
+function getLocalMidnightUtc(
+  parts: DateParts,
+): Date {
+  /*
+   * ابتدا یک حدس در ظهر UTC می‌سازیم.
+   * استفاده از ظهر به‌جای نیمه‌شب احتمال
+   * برخورد با مرزهای تغییر offset را کمتر می‌کند.
+   */
+  const utcGuess =
+    new Date(
+      Date.UTC(
+        parts.year,
+        parts.month - 1,
+        parts.day,
+        12,
+        0,
+        0,
+        0,
+      ),
+    );
+
+  const firstOffset =
+    getTimeZoneOffsetMs(
+      utcGuess,
+    );
+
+  let result =
+    new Date(
+      Date.UTC(
+        parts.year,
+        parts.month - 1,
+        parts.day,
+        0,
+        0,
+        0,
+        0,
+      ) - firstOffset,
+    );
+
+  /*
+   * یک بار دیگر offset را از خود timestamp
+   * نهایی می‌گیریم تا اگر timezone در آن
+   * بازه تغییر offset داشته باشد، مقدار
+   * نهایی دقیق‌تر شود.
+   */
+  const secondOffset =
+    getTimeZoneOffsetMs(result);
+
+  if (
+    secondOffset !== firstOffset
+  ) {
+    result =
+      new Date(
+        Date.UTC(
+          parts.year,
+          parts.month - 1,
+          parts.day,
+          0,
+          0,
+          0,
+          0,
+        ) - secondOffset,
+      );
+  }
+
+  return result;
+}
+
+export function getTodayRange() {
+  const now = new Date();
+
+  const todayParts =
+    getDateParts(now);
+
+  /*
+   * در حالت عادی Intl باید یک تاریخ معتبر
+   * برگرداند؛ این fallback فقط برای جلوگیری
+   * از انتشار Date نامعتبر در لایه‌های بالاتر
+   * گذاشته شده است.
+   */
+  if (
+    !isValidDateParts(
+      todayParts,
+    )
+  ) {
+    throw new Error(
+      "Unable to resolve today's date for the configured timezone.",
+    );
+  }
+
+  const tomorrowParts =
+    addCalendarDays(
+      todayParts,
+      1,
+    );
+
+  const start =
+    getLocalMidnightUtc(
+      todayParts,
+    );
+
+  const end =
+    getLocalMidnightUtc(
+      tomorrowParts,
+    );
+
+  return {
+    start,
+    end,
+  };
+}
+
+export function getDateRange(
+  dateKey: string,
+) {
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})$/.exec(
+      dateKey,
+    );
+
+  if (!match) {
+    return null;
+  }
+
+  const year =
+    Number(match[1]);
+
+  const month =
+    Number(match[2]);
+
+  const day =
+    Number(match[3]);
+
+  const parts: DateParts = {
+    year,
+    month,
+    day,
+  };
+
+  /*
+   * قبلاً فقط بازه 1 تا 31 بررسی می‌شد؛
+   * در نتیجه تاریخ‌هایی مثل 2026-02-31
+   * می‌توانستند وارد سیستم شوند.
+   */
+  if (
+    !isValidDateParts(parts)
+  ) {
+    return null;
+  }
+
+  const start =
+    getLocalMidnightUtc(
+      parts,
+    );
+
+  const nextDayParts =
+    addCalendarDays(
+      parts,
+      1,
+    );
+
+  const end =
+    getLocalMidnightUtc(
+      nextDayParts,
+    );
+
+  return {
+    start,
+    end,
+  };
+}
+
+export function getDateKey(
+  date: Date,
+) {
+  const parts =
+    getDateParts(date);
+
+  return [
+    parts.year
+      .toString()
+      .padStart(4, "0"),
+
+    parts.month
+      .toString()
+      .padStart(2, "0"),
+
+    parts.day
+      .toString()
+      .padStart(2, "0"),
+  ].join("-");
+}
+
+export function formatTime(
+  date: Date | null,
+) {
+  if (!date) {
+    return "--:--";
+  }
+
+  return new Intl.DateTimeFormat(
+    "fa-IR",
+    {
+      timeZone: TIME_ZONE,
+      hour: "2-digit",
+      minute: "2-digit",
+    },
+  ).format(date);
+}
+
+export function formatDate(
+  date: Date,
+) {
+  return new Intl.DateTimeFormat(
+    "fa-IR",
+    {
+      timeZone: TIME_ZONE,
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    },
+  ).format(date);
+}
+
+export function getPersianWeekday(
+  date: Date,
+) {
+  return new Intl.DateTimeFormat(
+    "fa-IR",
+    {
+      timeZone: TIME_ZONE,
+      weekday: "long",
+    },
+  ).format(date);
+}
+
+export function formatShortDate(
+  date: Date,
+) {
+  return new Intl.DateTimeFormat(
+    "fa-IR",
+    {
+      timeZone: TIME_ZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    },
+  ).format(date);
+}
+============================================================
+FILE: lib\attendance\engine.ts
+============================================================
+import type {
+  AttendanceStatus,
+  LeaveType,
+} from "@/app/generated/prisma/client";
+
+export type AttendanceSchedule = {
+  workStartMinutes: number;
+  workEndMinutes: number;
+
+  saturday: boolean;
+  sunday: boolean;
+  monday: boolean;
+  tuesday: boolean;
+  wednesday: boolean;
+  thursday: boolean;
+  friday: boolean;
+};
+
+export type AttendanceHoliday = {
+  title: string;
+  description: string | null;
+};
+
+export type AttendanceLeave = {
+  type: LeaveType;
+};
+
+export type AttendanceTemporaryExit = {
+  type: "TEMPORARY" | "MISSION";
+  status: "OPEN" | "COMPLETED";
+  startedAt: Date;
+  endedAt: Date | null;
+};
+
+export type AttendanceRecord = {
+  workDate: Date;
+  checkIn: Date | null;
+  checkOut: Date | null;
+  status: AttendanceStatus;
+  note: string | null;
+  temporaryExits?: AttendanceTemporaryExit[];
+};
+
+export type AttendanceDayState =
+  | "PRESENT"
+  | "WORKING"
+  | "ABSENT"
+  | "LEAVE"
+  | "HOLIDAY"
+  | "NON_WORKING"
+  | "FUTURE";
+
+export type AttendanceCalculation = {
+  state: AttendanceDayState;
+
+  isWorkingDay: boolean;
+  isHoliday: boolean;
+  isFuture: boolean;
+  isLeave: boolean;
+
+  holiday: AttendanceHoliday | null;
+  leave: AttendanceLeave | null;
+
+  scheduledStartMinutes: number;
+  scheduledEndMinutes: number;
+  scheduledMinutes: number;
+
+  checkIn: Date | null;
+  checkOut: Date | null;
+
+  workedMinutes: number;
+  temporaryExitMinutes: number;
+
+  lateMinutes: number;
+  earlyLeaveMinutes: number;
+  overtimeMinutes: number;
+  underworkMinutes: number;
+
+  balanceMinutes: number;
+
+  hasAttendance: boolean;
+  isComplete: boolean;
+
+  attendanceStatus: AttendanceStatus | null;
+
+  note: string | null;
+};
+
+type WeekdayKey =
+  | "saturday"
+  | "sunday"
+  | "monday"
+  | "tuesday"
+  | "wednesday"
+  | "thursday"
+  | "friday";
+
+const TIME_ZONE =
+  process.env.APP_TIMEZONE ||
+  "Asia/Tehran";
+
+const WEEKDAY_KEYS: Record<
+  string,
+  WeekdayKey
+> = {
+  Sat: "saturday",
+  Sun: "sunday",
+  Mon: "monday",
+  Tue: "tuesday",
+  Wed: "wednesday",
+  Thu: "thursday",
+  Fri: "friday",
+};
+
+function clampMinutes(
+  value: number,
+): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(
+    0,
+    Math.min(
+      1439,
+      Math.floor(value),
+    ),
+  );
+}
+
+function normalizeSchedule(
+  schedule: AttendanceSchedule,
+): AttendanceSchedule {
+  const start =
+    clampMinutes(
+      schedule.workStartMinutes,
+    );
+
+  const end =
+    clampMinutes(
+      schedule.workEndMinutes,
+    );
+
+  return {
+    workStartMinutes: start,
+    workEndMinutes: end,
+
+    saturday:
+      Boolean(schedule.saturday),
+
+    sunday:
+      Boolean(schedule.sunday),
+
+    monday:
+      Boolean(schedule.monday),
+
+    tuesday:
+      Boolean(schedule.tuesday),
+
+    wednesday:
+      Boolean(schedule.wednesday),
+
+    thursday:
+      Boolean(schedule.thursday),
+
+    friday:
+      Boolean(schedule.friday),
+  };
+}
+
+function getDateParts(
+  date: Date,
+): {
+  year: number;
+  month: number;
+  day: number;
+} {
+  const formatter =
+    new Intl.DateTimeFormat(
+      "en-US",
+      {
+        timeZone: TIME_ZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      },
+    );
+
+  const parts =
+    formatter.formatToParts(date);
+
+  const year = Number(
+    parts.find(
+      (part) =>
+        part.type === "year",
+    )?.value,
+  );
+
+  const month = Number(
+    parts.find(
+      (part) =>
+        part.type === "month",
+    )?.value,
+  );
+
+  const day = Number(
+    parts.find(
+      (part) =>
+        part.type === "day",
+    )?.value,
+  );
+
+  return {
+    year:
+      Number.isFinite(year)
+        ? year
+        : 0,
+
+    month:
+      Number.isFinite(month)
+        ? month
+        : 0,
+
+    day:
+      Number.isFinite(day)
+        ? day
+        : 0,
+  };
+}
+
+function getDateKey(
+  date: Date,
+): string {
+  const parts =
+    getDateParts(date);
+
+  return [
+    String(parts.year).padStart(
+      4,
+      "0",
+    ),
+    String(parts.month).padStart(
+      2,
+      "0",
+    ),
+    String(parts.day).padStart(
+      2,
+      "0",
+    ),
+  ].join("-");
+}
+
+function getWeekdayKey(
+  date: Date,
+): WeekdayKey {
+  const weekday =
+    new Intl.DateTimeFormat(
+      "en-US",
+      {
+        timeZone: TIME_ZONE,
+        weekday: "short",
+      },
+    ).format(date);
+
+  return (
+    WEEKDAY_KEYS[weekday] ??
+    "saturday"
+  );
+}
+
+function getIsWorkingDay(
+  date: Date,
+  schedule: AttendanceSchedule,
+): boolean {
+  const weekdayKey =
+    getWeekdayKey(date);
+
+  return schedule[
+    weekdayKey
+  ];
+}
+
+function getMinutesOfDay(
+  date: Date,
+): number {
+  const formatter =
+    new Intl.DateTimeFormat(
+      "en-US",
+      {
+        timeZone: TIME_ZONE,
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      },
+    );
+
+  const parts =
+    formatter.formatToParts(date);
+
+  const hour = Number(
+    parts.find(
+      (part) =>
+        part.type === "hour",
+    )?.value,
+  );
+
+  const minute = Number(
+    parts.find(
+      (part) =>
+        part.type === "minute",
+    )?.value,
+  );
+
+  if (
+    !Number.isFinite(hour) ||
+    !Number.isFinite(minute)
+  ) {
+    return 0;
+  }
+
+  return hour * 60 + minute;
+}
+
+function getDifferenceInMinutes(
+  from: Date,
+  to: Date,
+): number {
+  const difference =
+    to.getTime() -
+    from.getTime();
+
+  if (difference <= 0) {
+    return 0;
+  }
+
+  return Math.floor(
+    difference / 60000,
+  );
+}
+
+function isFutureDate(
+  workDate: Date,
+  now: Date,
+): boolean {
+  return (
+    getDateKey(workDate) >
+    getDateKey(now)
+  );
+}
+
+function normalizeTemporaryExits(
+  exits:
+    | AttendanceTemporaryExit[]
+    | undefined,
+): AttendanceTemporaryExit[] {
+  if (!exits?.length) {
+    return [];
+  }
+
+  return exits
+    .filter(
+      (exit) =>
+        exit.startedAt instanceof
+        Date,
+    )
+    .sort(
+      (a, b) =>
+        a.startedAt.getTime() -
+        b.startedAt.getTime(),
+    );
+}
+
+function getTemporaryExitMinutes(
+  attendance: AttendanceRecord | null,
+  now: Date,
+): number {
+  if (
+    !attendance?.checkIn
+  ) {
+    return 0;
+  }
+
+  const exits =
+    normalizeTemporaryExits(
+      attendance.temporaryExits,
+    );
+
+  if (!exits.length) {
+    return 0;
+  }
+
+  const attendanceEnd =
+    attendance.checkOut ??
+    now;
+
+  const attendanceStart =
+    attendance.checkIn;
+
+  let totalMinutes = 0;
+
+  for (const exit of exits) {
+    const exitStart =
+      exit.startedAt;
+
+    if (
+      exitStart.getTime() <=
+      attendanceStart.getTime()
+    ) {
+      continue;
+    }
+
+    if (
+      exitStart.getTime() >=
+      attendanceEnd.getTime()
+    ) {
+      continue;
+    }
+
+    let exitEnd =
+      exit.endedAt ??
+      null;
+
+    if (
+      exit.status ===
+        "COMPLETED" &&
+      !exitEnd
+    ) {
+      continue;
+    }
+
+    if (!exitEnd) {
+      exitEnd =
+        now.getTime() <
+        attendanceEnd.getTime()
+          ? now
+          : attendanceEnd;
+    }
+
+    const boundedStart =
+      exitStart.getTime() >
+      attendanceStart.getTime()
+        ? exitStart
+        : attendanceStart;
+
+    const boundedEnd =
+      exitEnd.getTime() <
+      attendanceEnd.getTime()
+        ? exitEnd
+        : attendanceEnd;
+
+    if (
+      boundedEnd.getTime() <=
+      boundedStart.getTime()
+    ) {
+      continue;
+    }
+
+    totalMinutes +=
+      getDifferenceInMinutes(
+        boundedStart,
+        boundedEnd,
+      );
+  }
+
+  return Math.max(
+    0,
+    totalMinutes,
+  );
+}
+
+function getWorkedMinutes(
+  attendance: AttendanceRecord | null,
+  now: Date,
+): number {
+  if (
+    !attendance ||
+    !attendance.checkIn
+  ) {
+    return 0;
+  }
+
+  const end =
+    attendance.checkOut ??
+    now;
+
+  const rawMinutes =
+    getDifferenceInMinutes(
+      attendance.checkIn,
+      end,
+    );
+
+  const temporaryExitMinutes =
+    getTemporaryExitMinutes(
+      attendance,
+      now,
+    );
+
+  return Math.max(
+    0,
+    rawMinutes -
+      temporaryExitMinutes,
+  );
+}
+
+export function calculateAttendanceDay(
+  input: {
+    workDate: Date;
+    attendance: AttendanceRecord | null;
+    schedule: AttendanceSchedule;
+    holiday?: AttendanceHoliday | null;
+    leave?: AttendanceLeave | null;
+    now?: Date;
+  },
+): AttendanceCalculation {
+  const now =
+    input.now ?? new Date();
+
+  const schedule =
+    normalizeSchedule(
+      input.schedule,
+    );
+
+  const holiday =
+    input.holiday ?? null;
+
+  const leave =
+    input.leave ?? null;
+
+  const isHoliday =
+    holiday !== null;
+
+  const isLeave =
+    leave !== null;
+
+  const isWorkingDay =
+    getIsWorkingDay(
+      input.workDate,
+      schedule,
+    );
+
+  const isFuture =
+    isFutureDate(
+      input.workDate,
+      now,
+    );
+
+  const attendance =
+    input.attendance;
+
+  const hasAttendance =
+    attendance !== null;
+
+  const checkIn =
+    attendance?.checkIn ??
+    null;
+
+  const checkOut =
+    attendance?.checkOut ??
+    null;
+
+  const isComplete =
+    Boolean(
+      checkIn &&
+        checkOut,
+    );
+
+  const scheduledStartMinutes =
+    schedule.workStartMinutes;
+
+  const scheduledEndMinutes =
+    schedule.workEndMinutes;
+
+  const scheduledMinutes =
+    Math.max(
+      0,
+      scheduledEndMinutes -
+        scheduledStartMinutes,
+    );
+
+  const temporaryExitMinutes =
+    getTemporaryExitMinutes(
+      attendance,
+      now,
+    );
+
+  const workedMinutes =
+    getWorkedMinutes(
+      attendance,
+      now,
+    );
+
+  let state: AttendanceDayState;
+
+  /*
+   * ترتیب اولویت وضعیت‌ها:
+   *
+   * ۱. تعطیل
+   * ۲. روز غیرکاری
+   * ۳. حضور واقعی ثبت‌شده
+   * ۴. مرخصی تأییدشده
+   * ۵. تاریخ آینده
+   * ۶. غیبت
+   */
+  if (isHoliday) {
+    state = "HOLIDAY";
+  } else if (!isWorkingDay) {
+    state = "NON_WORKING";
+  } else if (
+    hasAttendance &&
+    checkOut
+  ) {
+    state = "PRESENT";
+  } else if (
+    hasAttendance &&
+    checkIn
+  ) {
+    state = "WORKING";
+  } else if (isLeave) {
+    state = "LEAVE";
+  } else if (isFuture) {
+    state = "FUTURE";
+  } else {
+    state = "ABSENT";
+  }
+
+  let lateMinutes = 0;
+  let earlyLeaveMinutes = 0;
+  let overtimeMinutes = 0;
+  let underworkMinutes = 0;
+
+  /*
+   * تأخیر ورود
+   *
+   * خروج موقت هیچ اثری روی زمان ورود ندارد.
+   */
+  if (
+    checkIn &&
+    isWorkingDay &&
+    !isHoliday &&
+    !isLeave &&
+    !isFuture
+  ) {
+    const actualCheckInMinutes =
+      getMinutesOfDay(checkIn);
+
+    if (
+      actualCheckInMinutes >
+      scheduledStartMinutes
+    ) {
+      lateMinutes =
+        actualCheckInMinutes -
+        scheduledStartMinutes;
+    }
+  }
+
+  /*
+   * تعجیل و اضافه‌کاری بر اساس خروج نهایی
+   * محاسبه می‌شوند، نه آخرین بازگشت موقت.
+   */
+  if (
+    checkOut &&
+    isWorkingDay &&
+    !isHoliday &&
+    !isLeave &&
+    !isFuture
+  ) {
+    const actualCheckOutMinutes =
+      getMinutesOfDay(checkOut);
+
+    if (
+      actualCheckOutMinutes <
+      scheduledEndMinutes
+    ) {
+      earlyLeaveMinutes =
+        scheduledEndMinutes -
+        actualCheckOutMinutes;
+    }
+
+    if (
+      actualCheckOutMinutes >
+      scheduledEndMinutes
+    ) {
+      overtimeMinutes =
+        actualCheckOutMinutes -
+        scheduledEndMinutes;
+    }
+  }
+
+  /*
+   * کم‌کاری بر اساس کارکرد واقعی
+   * بعد از کسر خروج‌های موقت محاسبه می‌شود.
+   */
+  if (
+    isComplete &&
+    isWorkingDay &&
+    !isHoliday &&
+    !isLeave &&
+    !isFuture &&
+    workedMinutes <
+      scheduledMinutes
+  ) {
+    underworkMinutes =
+      scheduledMinutes -
+      workedMinutes;
+  }
+
+  /*
+   * تراز نیز بر اساس کارکرد واقعی است.
+   */
+  const balanceMinutes =
+    isComplete &&
+    isWorkingDay &&
+    !isHoliday &&
+    !isLeave &&
+    !isFuture
+      ? workedMinutes -
+        scheduledMinutes
+      : 0;
+
+  return {
+    state,
+
+    isWorkingDay,
+    isHoliday,
+    isFuture,
+    isLeave,
+
+    holiday,
+    leave,
+
+    scheduledStartMinutes,
+    scheduledEndMinutes,
+    scheduledMinutes,
+
+    checkIn,
+    checkOut,
+
+    workedMinutes,
+    temporaryExitMinutes,
+
+    lateMinutes,
+    earlyLeaveMinutes,
+    overtimeMinutes,
+    underworkMinutes,
+
+    balanceMinutes,
+
+    hasAttendance,
+    isComplete,
+
+    attendanceStatus:
+      attendance?.status ??
+      null,
+
+    note:
+      attendance?.note ??
+      null,
+  };
+}
+
+export function minutesToClock(
+  totalMinutes: number,
+): string {
+  const safe =
+    Number.isFinite(
+      totalMinutes,
+    )
+      ? Math.max(
+          0,
+          Math.floor(
+            totalMinutes,
+          ),
+        )
+      : 0;
+
+  const hours =
+    Math.floor(
+      safe / 60,
+    );
+
+  const minutes =
+    safe % 60;
+
+  return `${String(hours).padStart(
+    2,
+    "0",
+  )}:${String(minutes).padStart(
+    2,
+    "0",
+  )}`;
+}
+
+export function formatAttendanceMinutes(
+  totalMinutes: number,
+): string {
+  const safe =
+    Number.isFinite(
+      totalMinutes,
+    )
+      ? Math.max(
+          0,
+          Math.floor(
+            totalMinutes,
+          ),
+        )
+      : 0;
+
+  const hours =
+    Math.floor(
+      safe / 60,
+    );
+
+  const minutes =
+    safe % 60;
+
+  if (hours === 0) {
+    return `${minutes.toLocaleString(
+      "fa-IR",
+    )} دقیقه`;
+  }
+
+  if (minutes === 0) {
+    return `${hours.toLocaleString(
+      "fa-IR",
+    )} ساعت`;
+  }
+
+  return `${hours.toLocaleString(
+    "fa-IR",
+  )} ساعت و ${minutes.toLocaleString(
+    "fa-IR",
+  )} دقیقه`;
+}
+
+export function formatSignedAttendanceMinutes(
+  totalMinutes: number,
+): string {
+  if (
+    !Number.isFinite(
+      totalMinutes,
+    ) ||
+    totalMinutes === 0
+  ) {
+    return "۰ دقیقه";
+  }
+
+  const absolute =
+    Math.abs(
+      Math.floor(
+        totalMinutes,
+      ),
+    );
+
+  const formatted =
+    formatAttendanceMinutes(
+      absolute,
+    );
+
+  return totalMinutes > 0
+    ? `+${formatted}`
+    : `-${formatted}`;
+}
+
+export function getAttendanceStateLabel(
+  state: AttendanceDayState,
+): string {
+  switch (state) {
+    case "PRESENT":
+      return "حضور کامل";
+
+    case "WORKING":
+      return "در حال کار";
+
+    case "ABSENT":
+      return "غیبت";
+
+    case "LEAVE":
+      return "مرخصی";
+
+    case "HOLIDAY":
+      return "تعطیل";
+
+    case "NON_WORKING":
+      return "روز غیرکاری";
+
+    case "FUTURE":
+      return "آینده";
+
+    default:
+      return "نامشخص";
+  }
+}
+============================================================
+FILE: lib\attendance\schedule-resolver.ts
+============================================================
+import { prisma } from "@/lib/prisma";
+import type { AttendanceSchedule } from "@/lib/attendance/engine";
+
+export type ScheduleSettingsSource = {
+  workStartMinutes: number;
+  workEndMinutes: number;
+  saturday: boolean;
+  sunday: boolean;
+  monday: boolean;
+  tuesday: boolean;
+  wednesday: boolean;
+  thursday: boolean;
+  friday: boolean;
+};
+
+export type EmployeeShiftAssignment = {
+  id: string;
+  userId: string;
+  shiftId: string;
+  startsAt: Date;
+  endsAt: Date | null;
+
+  shift: {
+    id: string;
+    name: string;
+    startMinutes: number;
+    endMinutes: number;
+    saturday: boolean;
+    sunday: boolean;
+    monday: boolean;
+    tuesday: boolean;
+    wednesday: boolean;
+    thursday: boolean;
+    friday: boolean;
+  };
+};
+
+const DEFAULT_SCHEDULE: AttendanceSchedule = {
+  workStartMinutes: 510,
+  workEndMinutes: 1020,
+
+  saturday: true,
+  sunday: true,
+  monday: true,
+  tuesday: true,
+  wednesday: true,
+  thursday: true,
+  friday: false,
+};
+
+export function getDefaultAttendanceSchedule(
+  settings?: ScheduleSettingsSource | null,
+): AttendanceSchedule {
+  if (!settings) {
+    return DEFAULT_SCHEDULE;
+  }
+
+  return {
+    workStartMinutes: settings.workStartMinutes,
+    workEndMinutes: settings.workEndMinutes,
+
+    saturday: settings.saturday,
+    sunday: settings.sunday,
+    monday: settings.monday,
+    tuesday: settings.tuesday,
+    wednesday: settings.wednesday,
+    thursday: settings.thursday,
+    friday: settings.friday,
+  };
+}
+
+export function shiftToAttendanceSchedule(
+  shift: EmployeeShiftAssignment["shift"],
+): AttendanceSchedule {
+  return {
+    workStartMinutes: shift.startMinutes,
+    workEndMinutes: shift.endMinutes,
+
+    saturday: shift.saturday,
+    sunday: shift.sunday,
+    monday: shift.monday,
+    tuesday: shift.tuesday,
+    wednesday: shift.wednesday,
+    thursday: shift.thursday,
+    friday: shift.friday,
+  };
+}
+
+/**
+ * از بین انتساب‌های موجود، آخرین انتسابی که
+ * در تاریخ موردنظر معتبر است را انتخاب می‌کند.
+ *
+ * startsAt: inclusive
+ * endsAt: exclusive
+ */
+export function pickEmployeeShift(
+  assignments: EmployeeShiftAssignment[],
+  userId: string,
+  workDate: Date,
+): EmployeeShiftAssignment | null {
+  const matching = assignments
+    .filter(
+      (assignment) =>
+        assignment.userId === userId &&
+        assignment.startsAt.getTime() <=
+          workDate.getTime() &&
+        (assignment.endsAt === null ||
+          assignment.endsAt.getTime() >
+            workDate.getTime()),
+    )
+    .sort(
+      (a, b) =>
+        b.startsAt.getTime() -
+        a.startsAt.getTime(),
+    );
+
+  return matching[0] ?? null;
+}
+
+/**
+ * برنامه واقعی کارمند را برای یک تاریخ مشخص
+ * تعیین می‌کند:
+ *
+ * 1. شیفت اختصاصی معتبر
+ * 2. در غیر این صورت برنامه پیش‌فرض شرکت
+ */
+export function resolveEmployeeSchedule(
+  params: {
+    assignments: EmployeeShiftAssignment[];
+    userId: string;
+    workDate: Date;
+    fallbackSchedule: AttendanceSchedule;
+  },
+): AttendanceSchedule {
+  const assignment = pickEmployeeShift(
+    params.assignments,
+    params.userId,
+    params.workDate,
+  );
+
+  if (!assignment) {
+    return params.fallbackSchedule;
+  }
+
+  return shiftToAttendanceSchedule(
+    assignment.shift,
+  );
+}
+
+export async function getEmployeeShiftAssignments(
+  params: {
+    userIds: string[];
+    from: Date;
+    to: Date;
+  },
+): Promise<EmployeeShiftAssignment[]> {
+  if (params.userIds.length === 0) {
+    return [];
+  }
+
+  return prisma.employeeShift.findMany({
+    where: {
+      userId: {
+        in: params.userIds,
+      },
+
+      startsAt: {
+        lt: params.to,
+      },
+
+      OR: [
+        {
+          endsAt: null,
+        },
+        {
+          endsAt: {
+            gt: params.from,
+          },
+        },
+      ],
+    },
+
+    select: {
+      id: true,
+      userId: true,
+      shiftId: true,
+      startsAt: true,
+      endsAt: true,
+
+      shift: {
+        select: {
+          id: true,
+          name: true,
+          startMinutes: true,
+          endMinutes: true,
+
+          saturday: true,
+          sunday: true,
+          monday: true,
+          tuesday: true,
+          wednesday: true,
+          thursday: true,
+          friday: true,
+        },
+      },
+    },
+
+    orderBy: {
+      startsAt: "desc",
+    },
+  });
+}
+
+export async function getEmployeeShiftAssignment(
+  params: {
+    userId: string;
+    workDate: Date;
+  },
+): Promise<EmployeeShiftAssignment | null> {
+  return prisma.employeeShift.findFirst({
+    where: {
+      userId: params.userId,
+
+      startsAt: {
+        lte: params.workDate,
+      },
+
+      OR: [
+        {
+          endsAt: null,
+        },
+        {
+          endsAt: {
+            gt: params.workDate,
+          },
+        },
+      ],
+    },
+
+    select: {
+      id: true,
+      userId: true,
+      shiftId: true,
+      startsAt: true,
+      endsAt: true,
+
+      shift: {
+        select: {
+          id: true,
+          name: true,
+          startMinutes: true,
+          endMinutes: true,
+
+          saturday: true,
+          sunday: true,
+          monday: true,
+          tuesday: true,
+          wednesday: true,
+          thursday: true,
+          friday: true,
+        },
+      },
+    },
+
+    orderBy: {
+      startsAt: "desc",
+    },
+  });
+}
+============================================================
+FILE: lib\employee\attendance.ts
+============================================================
+"use server";
+
+import { revalidatePath } from "next/cache";
+
+import {
+  requireEmployee,
+} from "@/lib/auth/current-user";
+
+import {
+  calculateAttendanceDay,
+  type AttendanceSchedule,
+} from "@/lib/attendance/engine";
+
+import { getTodayRange } from "@/lib/date/tehran";
+
+import { prisma } from "@/lib/prisma";
+
+export type AttendanceActionState = {
+  success: boolean;
+  message: string;
+};
+
+export type TemporaryExitActionState = {
+  success: boolean;
+  message: string;
+};
+
+const emptyState: AttendanceActionState = {
+  success: false,
+  message: "",
+};
+
+const temporaryExitEmptyState: TemporaryExitActionState = {
+  success: false,
+  message: "",
+};
+
+const DEFAULT_SCHEDULE: AttendanceSchedule = {
+  workStartMinutes: 510,
+  workEndMinutes: 1020,
+
+  saturday: true,
+  sunday: true,
+  monday: true,
+  tuesday: true,
+  wednesday: true,
+  thursday: true,
+  friday: false,
+};
+
+function isPrismaKnownRequestError(
+  error: unknown,
+): error is {
+  code: string;
+} {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof (
+      error as {
+        code?: unknown;
+      }
+    ).code === "string"
+  );
+}
+
+function parseTemporaryExitType(
+  value: string,
+): "TEMPORARY" | "MISSION" | null {
+  if (
+    value === "TEMPORARY" ||
+    value === "MISSION"
+  ) {
+    return value;
+  }
+
+  return null;
+}
+
+function normalizeOptionalText(
+  value: FormDataEntryValue | null | undefined,
+  maxLength: number,
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized =
+    value.trim();
+
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized.slice(
+    0,
+    maxLength,
+  );
+}
+
+export async function checkIn(
+  _previousState: AttendanceActionState = emptyState,
+  _formData?: FormData,
+): Promise<AttendanceActionState> {
+  const user =
+    await requireEmployee();
+
+  const { start, end } =
+    getTodayRange();
+
+  try {
+    const [
+      existing,
+      settings,
+      todayHoliday,
+    ] = await Promise.all([
+      prisma.attendance.findUnique({
+        where: {
+          userId_workDate: {
+            userId: user.id,
+            workDate: start,
+          },
+        },
+        select: {
+          id: true,
+          checkIn: true,
+          checkOut: true,
+        },
+      }),
+
+      prisma.companySettings.findUnique({
+        where: {
+          id: "company",
+        },
+      }),
+
+      prisma.holiday.findUnique({
+        where: {
+          date: start,
+        },
+        select: {
+          title: true,
+          description: true,
+        },
+      }),
+    ]);
+
+    const schedule =
+      settings ?? DEFAULT_SCHEDULE;
+
+    const dayCalculation =
+      calculateAttendanceDay({
+        workDate: start,
+        schedule,
+        holiday:
+          todayHoliday
+            ? {
+                title:
+                  todayHoliday.title,
+                description:
+                  todayHoliday.description,
+              }
+            : null,
+        attendance: null,
+      });
+
+    if (
+      dayCalculation.state ===
+      "HOLIDAY"
+    ) {
+      return {
+        success: false,
+        message:
+          todayHoliday?.title
+            ? `امروز تعطیل است: ${todayHoliday.title}`
+            : "امروز تعطیل است و امکان ثبت ورود وجود ندارد.",
+      };
+    }
+
+    if (
+      dayCalculation.state ===
+      "NON_WORKING"
+    ) {
+      return {
+        success: false,
+        message:
+          "امروز طبق برنامه کاری شرکت روز غیرکاری است.",
+      };
+    }
+
+    if (existing?.checkIn) {
+      return {
+        success: false,
+        message:
+          "ورود امروز شما قبلاً ثبت شده است.",
+      };
+    }
+
+    if (
+      existing &&
+      !existing.checkIn &&
+      existing.checkOut
+    ) {
+      return {
+        success: false,
+        message:
+          "رکورد حضور امروز وضعیت نامعتبر دارد. لطفاً با مدیر سیستم تماس بگیرید.",
+      };
+    }
+
+    if (existing) {
+      const result =
+        await prisma.attendance.updateMany({
+          where: {
+            id: existing.id,
+            checkIn: null,
+            checkOut: null,
+          },
+          data: {
+            checkIn: new Date(),
+            status: "OPEN",
+          },
+        });
+
+      if (result.count === 0) {
+        return {
+          success: false,
+          message:
+            "ورود امروز شما قبلاً ثبت شده است.",
+        };
+      }
+    } else {
+      try {
+        await prisma.attendance.create({
+          data: {
+            userId: user.id,
+            workDate: start,
+            checkIn: new Date(),
+            status: "OPEN",
+          },
+        });
+      } catch (error) {
+        if (
+          isPrismaKnownRequestError(
+            error,
+          ) &&
+          error.code === "P2002"
+        ) {
+          return {
+            success: false,
+            message:
+              "ورود امروز شما قبلاً ثبت شده است.",
+          };
+        }
+
+        throw error;
+      }
+    }
+
+    revalidatePath("/employee");
+    revalidatePath("/admin");
+    revalidatePath("/admin/attendance");
+    revalidatePath(
+      "/admin/attendance/[userId]",
+    );
+    revalidatePath("/admin/calendar");
+    revalidatePath("/admin/reports");
+
+    return {
+      success: true,
+      message:
+        "ورود شما با موفقیت ثبت شد.",
+    };
+  } catch (error) {
+    console.error(
+      "Employee check-in error:",
+      error,
+    );
+
+    return {
+      success: false,
+      message:
+        "ثبت ورود انجام نشد. دوباره تلاش کنید.",
+    };
+  }
+}
+
+export async function startTemporaryExit(
+  _previousState: TemporaryExitActionState = temporaryExitEmptyState,
+  formData?: FormData,
+): Promise<TemporaryExitActionState> {
+  const user =
+    await requireEmployee();
+
+  const { start } =
+    getTodayRange();
+
+  try {
+    const type =
+      parseTemporaryExitType(
+        String(
+          formData?.get("type") ??
+            "",
+        ),
+      );
+
+    if (!type) {
+      return {
+        success: false,
+        message:
+          "نوع خروج را انتخاب کنید.",
+      };
+    }
+
+    const reason =
+      normalizeOptionalText(
+        formData?.get("reason"),
+        500,
+      );
+
+    const result =
+      await prisma.$transaction(
+        async (tx) => {
+          const attendance =
+            await tx.attendance.findUnique({
+              where: {
+                userId_workDate: {
+                  userId: user.id,
+                  workDate: start,
+                },
+              },
+              select: {
+                id: true,
+                checkIn: true,
+                checkOut: true,
+              },
+            });
+
+          if (!attendance?.checkIn) {
+            return {
+              ok: false as const,
+              message:
+                "ابتدا باید ورود خود را ثبت کنید.",
+            };
+          }
+
+          if (attendance.checkOut) {
+            return {
+              ok: false as const,
+              message:
+                "حضور امروز شما قبلاً با خروج نهایی بسته شده است.",
+            };
+          }
+
+          /*
+           * با تغییر رکورد Attendance در ابتدای تراکنش،
+           * ردیف همان روز قفل می‌شود و دو درخواست
+           * همزمان نمی‌توانند برای یک کارمند، دو
+           * خروج باز ایجاد کنند.
+           */
+          await tx.attendance.update({
+            where: {
+              id: attendance.id,
+            },
+            data: {
+              updatedAt: new Date(),
+            },
+          });
+
+          const openExit =
+            await tx.temporaryExit.findFirst({
+              where: {
+                attendanceId:
+                  attendance.id,
+                status: "OPEN",
+              },
+              select: {
+                id: true,
+              },
+            });
+
+          if (openExit) {
+            return {
+              ok: false as const,
+              message:
+                "در حال حاضر یک خروج باز دارید. ابتدا باید بازگشت خود را ثبت کنید.",
+            };
+          }
+
+          const temporaryExit =
+            await tx.temporaryExit.create({
+              data: {
+                userId: user.id,
+                attendanceId:
+                  attendance.id,
+                type,
+                status: "OPEN",
+                startedAt:
+                  new Date(),
+                reason,
+              },
+              select: {
+                id: true,
+                type: true,
+                status: true,
+                startedAt: true,
+                endedAt: true,
+                reason: true,
+                note: true,
+              },
+            });
+
+          await tx.temporaryExitAudit.create({
+            data: {
+              temporaryExitId:
+                temporaryExit.id,
+
+              actorId:
+                user.id,
+
+              action: "CREATE",
+
+              previousType:
+                null,
+
+              previousStatus:
+                null,
+
+              previousStartedAt:
+                null,
+
+              previousEndedAt:
+                null,
+
+              previousReason:
+                null,
+
+              previousNote:
+                null,
+
+              newType:
+                temporaryExit.type,
+
+              newStatus:
+                temporaryExit.status,
+
+              newStartedAt:
+                temporaryExit.startedAt,
+
+              newEndedAt:
+                temporaryExit.endedAt,
+
+              newReason:
+                temporaryExit.reason,
+
+              newNote:
+                temporaryExit.note,
+            },
+          });
+
+          return {
+            ok: true as const,
+            message:
+              type === "MISSION"
+                ? "مأموریت شما با موفقیت ثبت شد."
+                : "خروج موقت شما با موفقیت ثبت شد.",
+          };
+        },
+      );
+
+    if (!result.ok) {
+      return {
+        success: false,
+        message: result.message,
+      };
+    }
+
+    revalidatePath("/employee");
+    revalidatePath("/admin");
+    revalidatePath("/admin/attendance");
+    revalidatePath(
+      "/admin/attendance/[userId]",
+    );
+    revalidatePath("/admin/calendar");
+    revalidatePath("/admin/reports");
+
+    return {
+      success: true,
+      message: result.message,
+    };
+  } catch (error) {
+    console.error(
+      "Employee temporary exit start error:",
+      error,
+    );
+
+    return {
+      success: false,
+      message:
+        "ثبت خروج موقت انجام نشد. دوباره تلاش کنید.",
+    };
+  }
+}
+
+export async function returnFromTemporaryExit(
+  _previousState: TemporaryExitActionState = temporaryExitEmptyState,
+  _formData?: FormData,
+): Promise<TemporaryExitActionState> {
+  const user =
+    await requireEmployee();
+
+  const { start } =
+    getTodayRange();
+
+  try {
+    const result =
+      await prisma.$transaction(
+        async (tx) => {
+          const attendance =
+            await tx.attendance.findUnique({
+              where: {
+                userId_workDate: {
+                  userId: user.id,
+                  workDate: start,
+                },
+              },
+              select: {
+                id: true,
+                checkIn: true,
+                checkOut: true,
+              },
+            });
+
+          if (!attendance?.checkIn) {
+            return {
+              ok: false as const,
+              message:
+                "امروز ورود فعالی برای شما ثبت نشده است.",
+            };
+          }
+
+          if (attendance.checkOut) {
+            return {
+              ok: false as const,
+              message:
+                "خروج نهایی امروز قبلاً ثبت شده است.",
+            };
+          }
+
+          /*
+           * قفل رکورد روز برای جلوگیری از
+           * بازگشت همزمان و ثبت چندباره.
+           */
+          await tx.attendance.update({
+            where: {
+              id: attendance.id,
+            },
+            data: {
+              updatedAt: new Date(),
+            },
+          });
+
+          const openExit =
+            await tx.temporaryExit.findFirst({
+              where: {
+                attendanceId:
+                  attendance.id,
+                status: "OPEN",
+              },
+              orderBy: {
+                startedAt: "desc",
+              },
+              select: {
+                id: true,
+                type: true,
+                status: true,
+                startedAt: true,
+                endedAt: true,
+                reason: true,
+                note: true,
+              },
+            });
+
+          if (!openExit) {
+            return {
+              ok: false as const,
+              message:
+                "هیچ خروج موقتی برای بازگشت ثبت نشده است.",
+            };
+          }
+
+          const endedAt =
+            new Date();
+
+          const updated =
+            await tx.temporaryExit.updateMany({
+              where: {
+                id: openExit.id,
+                status: "OPEN",
+                endedAt: null,
+              },
+              data: {
+                endedAt,
+                status: "COMPLETED",
+              },
+            });
+
+          if (updated.count === 0) {
+            return {
+              ok: false as const,
+              message:
+                "بازگشت شما قبلاً ثبت شده است.",
+            };
+          }
+
+          await tx.temporaryExitAudit.create({
+            data: {
+              temporaryExitId:
+                openExit.id,
+
+              actorId:
+                user.id,
+
+              action: "UPDATE",
+
+              previousType:
+                openExit.type,
+
+              previousStatus:
+                openExit.status,
+
+              previousStartedAt:
+                openExit.startedAt,
+
+              previousEndedAt:
+                openExit.endedAt,
+
+              previousReason:
+                openExit.reason,
+
+              previousNote:
+                openExit.note,
+
+              newType:
+                openExit.type,
+
+              newStatus:
+                "COMPLETED",
+
+              newStartedAt:
+                openExit.startedAt,
+
+              newEndedAt:
+                endedAt,
+
+              newReason:
+                openExit.reason,
+
+              newNote:
+                openExit.note,
+            },
+          });
+
+          return {
+            ok: true as const,
+            message:
+              "بازگشت شما با موفقیت ثبت شد.",
+          };
+        },
+      );
+
+    if (!result.ok) {
+      return {
+        success: false,
+        message: result.message,
+      };
+    }
+
+    revalidatePath("/employee");
+    revalidatePath("/admin");
+    revalidatePath("/admin/attendance");
+    revalidatePath(
+      "/admin/attendance/[userId]",
+    );
+    revalidatePath("/admin/calendar");
+    revalidatePath("/admin/reports");
+
+    return {
+      success: true,
+      message:
+        result.message,
+    };
+  } catch (error) {
+    console.error(
+      "Employee temporary exit return error:",
+      error,
+    );
+
+    return {
+      success: false,
+      message:
+        "ثبت بازگشت انجام نشد. دوباره تلاش کنید.",
+    };
+  }
+}
+
+export async function checkOut(): Promise<AttendanceActionState> {
+  const user =
+    await requireEmployee();
+
+  const { start } =
+    getTodayRange();
+
+  try {
+    const result =
+      await prisma.$transaction(
+        async (tx) => {
+          const attendance =
+            await tx.attendance.findUnique({
+              where: {
+                userId_workDate: {
+                  userId: user.id,
+                  workDate: start,
+                },
+              },
+              select: {
+                id: true,
+                checkIn: true,
+                checkOut: true,
+              },
+            });
+
+          if (!attendance?.checkIn) {
+            return {
+              ok: false as const,
+              message:
+                "ابتدا باید ورود خود را ثبت کنید.",
+            };
+          }
+
+          if (attendance.checkOut) {
+            return {
+              ok: false as const,
+              message:
+                "خروج امروز شما قبلاً ثبت شده است.",
+            };
+          }
+
+          /*
+           * رکورد روز را قفل می‌کنیم تا هنگام
+           * ثبت خروج نهایی، وضعیت خروج موقت
+           * همزمان تغییر نکند.
+           */
+          await tx.attendance.update({
+            where: {
+              id: attendance.id,
+            },
+            data: {
+              updatedAt: new Date(),
+            },
+          });
+
+          const openExit =
+            await tx.temporaryExit.findFirst({
+              where: {
+                attendanceId:
+                  attendance.id,
+                status: "OPEN",
+              },
+              select: {
+                id: true,
+              },
+            });
+
+          if (openExit) {
+            return {
+              ok: false as const,
+              message:
+                "ابتدا باید از خروج موقت یا مأموریت خود بازگردید، سپس خروج نهایی را ثبت کنید.",
+            };
+          }
+
+          const result =
+            await tx.attendance.updateMany({
+              where: {
+                id: attendance.id,
+                checkIn: {
+                  not: null,
+                },
+                checkOut: null,
+              },
+              data: {
+                checkOut:
+                  new Date(),
+                status:
+                  "COMPLETED",
+              },
+            });
+
+          if (result.count === 0) {
+            return {
+              ok: false as const,
+              message:
+                "خروج امروز شما قبلاً ثبت شده است.",
+            };
+          }
+
+          return {
+            ok: true as const,
+            message:
+              "خروج شما با موفقیت ثبت شد.",
+          };
+        },
+      );
+
+    if (!result.ok) {
+      return {
+        success: false,
+        message: result.message,
+      };
+    }
+
+    revalidatePath("/employee");
+    revalidatePath("/admin");
+    revalidatePath("/admin/attendance");
+    revalidatePath(
+      "/admin/attendance/[userId]",
+    );
+    revalidatePath("/admin/calendar");
+    revalidatePath("/admin/reports");
+
+    return {
+      success: true,
+      message:
+        result.message,
+    };
+  } catch (error) {
+    console.error(
+      "Employee check-out error:",
+      error,
+    );
+
+    return {
+      success: false,
+      message:
+        "ثبت خروج انجام نشد. دوباره تلاش کنید.",
+    };
+  }
+}
+============================================================
+FILE: app\employee\employee-actions.tsx
+============================================================
+"use client";
+
+import {
+  Loader2,
+  LogIn,
+  LogOut,
+} from "lucide-react";
+import {
+  useActionState,
+  useEffect,
+} from "react";
+
+import {
+  checkIn,
+  checkOut,
+  type AttendanceActionState,
+} from "@/lib/employee/attendance";
+
+const initialState: AttendanceActionState = {
+  success: false,
+  message: "",
+};
+
+function ActionMessage({
+  state,
+}: {
+  state: AttendanceActionState;
+}) {
+  if (!state.message || state.success) {
+    return null;
+  }
+
+  return (
+    <p
+      role="alert"
+      className="mt-3 rounded-2xl bg-red-50 px-4 py-3 text-xs leading-5 text-red-700"
+    >
+      {state.message}
+    </p>
+  );
+}
+
+export function CheckInButton() {
+  const [state, formAction, pending] =
+    useActionState(
+      checkIn,
+      initialState,
+    );
+
+  useEffect(() => {
+    if (!state.success) {
+      return;
+    }
+
+    window.location.reload();
+  }, [state.success]);
+
+  return (
+    <div>
+      <form action={formAction}>
+        <button
+          type="submit"
+          disabled={pending}
+          aria-disabled={pending}
+          className="
+            flex h-16 w-full
+            items-center justify-center
+            gap-3 rounded-[22px]
+            bg-emerald-600
+            px-5
+            text-base font-bold
+            text-white
+            shadow-xl
+            shadow-emerald-600/20
+            transition
+            hover:bg-emerald-700
+            active:scale-[0.99]
+            disabled:cursor-not-allowed
+            disabled:opacity-60
+          "
+        >
+          {pending ? (
+            <Loader2
+              size={21}
+              className="animate-spin"
+              aria-hidden="true"
+            />
+          ) : (
+            <LogIn
+              size={21}
+              aria-hidden="true"
+            />
+          )}
+
+          <span>
+            {pending
+              ? "در حال ثبت ورود..."
+              : "ثبت ورود"}
+          </span>
+        </button>
+      </form>
+
+      <ActionMessage state={state} />
+    </div>
+  );
+}
+
+export function CheckOutButton() {
+  const [state, formAction, pending] =
+    useActionState(
+      checkOut,
+      initialState,
+    );
+
+  useEffect(() => {
+    if (!state.success) {
+      return;
+    }
+
+    window.location.reload();
+  }, [state.success]);
+
+  return (
+    <div>
+      <form action={formAction}>
+        <button
+          type="submit"
+          disabled={pending}
+          aria-disabled={pending}
+          className="
+            flex h-16 w-full
+            items-center justify-center
+            gap-3 rounded-[22px]
+            bg-slate-950
+            px-5
+            text-base font-bold
+            text-white
+            shadow-xl
+            shadow-slate-950/15
+            transition
+            hover:bg-slate-800
+            active:scale-[0.99]
+            disabled:cursor-not-allowed
+            disabled:opacity-60
+          "
+        >
+          {pending ? (
+            <Loader2
+              size={21}
+              className="animate-spin"
+              aria-hidden="true"
+            />
+          ) : (
+            <LogOut
+              size={21}
+              aria-hidden="true"
+            />
+          )}
+
+          <span>
+            {pending
+              ? "در حال ثبت خروج..."
+              : "ثبت خروج"}
+          </span>
+        </button>
+      </form>
+
+      <ActionMessage state={state} />
+    </div>
+  );
+}
+============================================================
+FILE: app\employee\temporary-exit-actions.tsx
+============================================================
+"use client";
+
+import {
+  ArrowRightLeft,
+  BriefcaseBusiness,
+  Loader2,
+  MapPinOff,
+  RotateCcw,
+} from "lucide-react";
+import {
+  useActionState,
+  useEffect,
+} from "react";
+
+import {
+  returnFromTemporaryExit,
+  startTemporaryExit,
+  type TemporaryExitActionState,
+} from "@/lib/employee/attendance";
+
+const initialState: TemporaryExitActionState = {
+  success: false,
+  message: "",
+};
+
+export default function TemporaryExitActions({
+  hasOpenExit,
+}: {
+  hasOpenExit: boolean;
+}) {
+  const [
+    startState,
+    startAction,
+    startPending,
+  ] = useActionState(
+    startTemporaryExit,
+    initialState,
+  );
+  const [
+    returnState,
+    returnAction,
+    returnPending,
+  ] = useActionState(
+    returnFromTemporaryExit,
+    initialState,
+  );
+
+  useEffect(() => {
+    if (
+      !startState.success &&
+      !returnState.success
+    ) {
+      return;
+    }
+
+    window.location.reload();
+  }, [
+    startState.success,
+    returnState.success,
+  ]);
+
+  if (hasOpenExit) {
+    return (
+      <div className="mt-5 rounded-[24px] border border-amber-200/80 bg-amber-50/70 p-4 sm:p-5">
+        <div className="flex items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-100 text-amber-700">
+            <ArrowRightLeft
+              size={19}
+            />
+          </div>
+
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-bold text-amber-900">
+              خروج موقت فعال است
+            </p>
+
+            <p className="mt-1 text-[11px] leading-5 text-amber-700/80">
+              شما در حال خروج از محل کار هستید. برای ادامه ثبت حضور، بازگشت خود را ثبت کنید.
+            </p>
+          </div>
+        </div>
+
+        <form
+          action={returnAction}
+          className="mt-4"
+        >
+          <button
+            type="submit"
+            disabled={returnPending}
+            aria-disabled={
+              returnPending
+            }
+            className="
+              flex
+              h-14
+              w-full
+              items-center
+              justify-center
+              gap-2.5
+              rounded-[18px]
+              bg-amber-600
+              px-5
+              text-sm
+              font-bold
+              text-white
+              shadow-lg
+              shadow-amber-600/15
+              transition
+              hover:bg-amber-700
+              active:scale-[0.99]
+              disabled:cursor-not-allowed
+              disabled:opacity-60
+            "
+          >
+            {returnPending ? (
+              <Loader2
+                size={18}
+                className="animate-spin"
+                aria-hidden="true"
+              />
+            ) : (
+              <RotateCcw
+                size={18}
+                aria-hidden="true"
+              />
+            )}
+
+            <span>
+              {returnPending
+                ? "در حال ثبت بازگشت..."
+                : "ثبت بازگشت"}
+            </span>
+          </button>
+        </form>
+
+        {!returnState.success &&
+        returnState.message ? (
+          <p
+            role="alert"
+            className="mt-3 rounded-2xl bg-rose-50 px-3.5 py-3 text-xs leading-5 text-rose-700"
+          >
+            {returnState.message}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-5 rounded-[24px] border border-slate-200/80 bg-slate-50/70 p-4 sm:p-5">
+      <div className="flex items-start gap-3">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white text-slate-700 shadow-sm">
+          <MapPinOff size={19} />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-bold text-slate-900">
+            خروج در طول روز
+          </p>
+
+          <p className="mt-1 text-[11px] leading-5 text-slate-400">
+            برای خروج کوتاه‌مدت یا انجام مأموریت، گزینه مناسب را ثبت کنید.
+          </p>
+        </div>
+      </div>
+
+      <form
+        action={startAction}
+        className="mt-4"
+      >
+        <div className="grid grid-cols-2 gap-2.5">
+          <button
+            type="submit"
+            name="type"
+            value="TEMPORARY"
+            disabled={startPending}
+            aria-disabled={
+              startPending
+            }
+            className="
+              flex
+              h-14
+              items-center
+              justify-center
+              gap-2
+              rounded-[18px]
+              border
+              border-slate-200
+              bg-white
+              px-3
+              text-xs
+              font-bold
+              text-slate-700
+              shadow-sm
+              transition
+              hover:border-slate-300
+              hover:bg-slate-50
+              active:scale-[0.99]
+              disabled:cursor-not-allowed
+              disabled:opacity-60
+            "
+          >
+            {startPending ? (
+              <Loader2
+                size={17}
+                className="animate-spin"
+                aria-hidden="true"
+              />
+            ) : (
+              <ArrowRightLeft
+                size={17}
+                aria-hidden="true"
+              />
+            )}
+
+            <span>
+              خروج موقت
+            </span>
+          </button>
+
+          <button
+            type="submit"
+            name="type"
+            value="MISSION"
+            disabled={startPending}
+            aria-disabled={
+              startPending
+            }
+            className="
+              flex
+              h-14
+              items-center
+              justify-center
+              gap-2
+              rounded-[18px]
+              bg-slate-950
+              px-3
+              text-xs
+              font-bold
+              text-white
+              shadow-lg
+              shadow-slate-950/10
+              transition
+              hover:bg-slate-800
+              active:scale-[0.99]
+              disabled:cursor-not-allowed
+              disabled:opacity-60
+            "
+          >
+            {startPending ? (
+              <Loader2
+                size={17}
+                className="animate-spin"
+                aria-hidden="true"
+              />
+            ) : (
+              <BriefcaseBusiness
+                size={17}
+                aria-hidden="true"
+              />
+            )}
+
+            <span>
+              شروع مأموریت
+            </span>
+          </button>
+        </div>
+      </form>
+
+      {!startState.success &&
+      startState.message ? (
+        <p
+          role="alert"
+          className="mt-3 rounded-2xl bg-rose-50 px-3.5 py-3 text-xs leading-5 text-rose-700"
+        >
+          {startState.message}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+============================================================
+FILE: app\employee\temporary-exit-duration.tsx
+============================================================
+"use client";
+
+import {
+  useEffect,
+  useState,
+} from "react";
+
+function formatDuration(
+  milliseconds: number,
+): string {
+  const totalMinutes = Math.max(
+    0,
+    Math.floor(
+      milliseconds / 60000,
+    ),
+  );
+
+  const hours = Math.floor(
+    totalMinutes / 60,
+  );
+
+  const minutes =
+    totalMinutes % 60;
+
+  const seconds = Math.floor(
+    (milliseconds % 60000) / 1000,
+  );
+
+  if (hours > 0) {
+    return `${hours.toLocaleString(
+      "fa-IR",
+    )} ساعت و ${minutes.toLocaleString(
+      "fa-IR",
+    )} دقیقه`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes.toLocaleString(
+      "fa-IR",
+    )} دقیقه و ${seconds.toLocaleString(
+      "fa-IR",
+    )} ثانیه`;
+  }
+
+  return `${seconds.toLocaleString(
+    "fa-IR",
+  )} ثانیه`;
+}
+
+export default function TemporaryExitDuration({
+  startedAt,
+}: {
+  startedAt: string;
+}) {
+  const [now, setNow] =
+    useState<Date | null>(null);
+
+  useEffect(() => {
+    const current = new Date();
+
+    setNow(current);
+
+    const interval =
+      window.setInterval(() => {
+        setNow(new Date());
+      }, 1000);
+
+    return () =>
+      window.clearInterval(
+        interval,
+      );
+  }, []);
+
+  const start =
+    new Date(startedAt);
+
+  const duration =
+    now && Number.isFinite(
+      start.getTime(),
+    )
+      ? formatDuration(
+          now.getTime() -
+            start.getTime(),
+        )
+      : "در حال محاسبه...";
+
+  return (
+    <span className="font-semibold text-amber-700">
+      {duration}
+    </span>
+  );
+}
+============================================================
+FILE: app\employee\temporary-exit-panel.tsx
+============================================================
+import {
+  ArrowRightLeft,
+  BriefcaseBusiness,
+  CheckCircle2,
+  Clock3,
+} from "lucide-react";
+
+import {
+  formatTime,
+} from "@/lib/date/tehran";
+
+import { prisma } from "@/lib/prisma";
+
+import TemporaryExitActions from "./temporary-exit-actions";
+import TemporaryExitDuration from "./temporary-exit-duration";
+
+type TemporaryExitPanelProps = {
+  attendanceId: string;
+};
+
+function getTypeLabel(
+  type: string,
+): string {
+  switch (type) {
+    case "MISSION":
+      return "مأموریت";
+
+    case "TEMPORARY":
+    default:
+      return "خروج موقت";
+  }
+}
+
+function getTypeIcon(
+  type: string,
+) {
+  return type === "MISSION"
+    ? BriefcaseBusiness
+    : ArrowRightLeft;
+}
+
+function formatMinutes(
+  totalMinutes: number,
+): string {
+  if (totalMinutes <= 0) {
+    return "۰ دقیقه";
+  }
+
+  const hours = Math.floor(
+    totalMinutes / 60,
+  );
+
+  const minutes =
+    totalMinutes % 60;
+
+  if (hours === 0) {
+    return `${minutes.toLocaleString(
+      "fa-IR",
+    )} دقیقه`;
+  }
+
+  if (minutes === 0) {
+    return `${hours.toLocaleString(
+      "fa-IR",
+    )} ساعت`;
+  }
+
+  return `${hours.toLocaleString(
+    "fa-IR",
+  )} ساعت و ${minutes.toLocaleString(
+    "fa-IR",
+  )} دقیقه`;
+}
+
+export default async function TemporaryExitPanel({
+  attendanceId,
+}: TemporaryExitPanelProps) {
+  const exits =
+    await prisma.temporaryExit.findMany({
+      where: {
+        attendanceId,
+      },
+      orderBy: {
+        startedAt: "desc",
+      },
+      take: 8,
+      select: {
+        id: true,
+        type: true,
+        status: true,
+        startedAt: true,
+        endedAt: true,
+        reason: true,
+      },
+    });
+
+  const openExit =
+    exits.find(
+      (exit) =>
+        exit.status === "OPEN",
+    ) ?? null;
+
+  const completedExits =
+    exits.filter(
+      (exit) =>
+        exit.status ===
+          "COMPLETED" &&
+        exit.endedAt,
+    );
+
+  const totalTemporaryExitMinutes =
+    completedExits.reduce(
+      (total, exit) => {
+        if (!exit.endedAt) {
+          return total;
+        }
+
+        const minutes = Math.floor(
+          (exit.endedAt.getTime() -
+            exit.startedAt.getTime()) /
+            60000,
+        );
+
+        return total + Math.max(
+          0,
+          minutes,
+        );
+      },
+      0,
+    );
+
+  return (
+    <section className="mt-5 overflow-hidden rounded-[26px] border border-slate-200/80 bg-white shadow-[0_10px_35px_rgba(15,23,42,0.04)]">
+      <div className="border-b border-slate-100 px-5 py-5 sm:px-6">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-slate-950 text-white">
+              <ArrowRightLeft
+                size={20}
+              />
+            </div>
+
+            <div className="min-w-0">
+              <h2 className="text-base font-bold text-slate-950">
+                خروج موقت و مأموریت
+              </h2>
+
+              <p className="mt-1 text-xs leading-5 text-slate-400">
+                خروج‌های بین روز را ثبت و وضعیت بازگشت را مدیریت کنید.
+              </p>
+            </div>
+          </div>
+
+          {completedExits.length >
+          0 ? (
+            <div className="shrink-0 rounded-full bg-slate-50 px-3 py-1.5 text-[10px] font-semibold text-slate-500">
+              مجموع:{" "}
+              {formatMinutes(
+                totalTemporaryExitMinutes,
+              )}
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="p-5 sm:p-6">
+        <TemporaryExitActions
+          hasOpenExit={Boolean(
+            openExit,
+          )}
+        />
+
+        {openExit ? (
+          <div className="mt-4 rounded-[22px] border border-amber-200/80 bg-amber-50/50 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-700">
+                  <Clock3 size={17} />
+                </div>
+
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-amber-900">
+                    {getTypeLabel(
+                      openExit.type,
+                    )}
+                  </p>
+
+                  <p className="mt-1 text-[10px] text-amber-700/70">
+                    شروع:{" "}
+                    {formatTime(
+                      openExit.startedAt,
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              <div className="shrink-0 text-left">
+                <p className="text-[9px] font-medium text-amber-700/60">
+                  مدت خروج
+                </p>
+
+                <p className="mt-1 text-xs">
+                  <TemporaryExitDuration
+                    startedAt={openExit.startedAt.toISOString()}
+                  />
+                </p>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {completedExits.length >
+        0 ? (
+          <div className="mt-5">
+            <div className="mb-3 flex items-center gap-2">
+              <CheckCircle2
+                size={15}
+                className="text-emerald-500"
+              />
+
+              <p className="text-[11px] font-bold text-slate-700">
+                خروج‌های ثبت‌شده امروز
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              {completedExits.map(
+                (exit) => {
+                  const Icon =
+                    getTypeIcon(
+                      exit.type,
+                    );
+
+                  const durationMinutes =
+                    exit.endedAt
+                      ? Math.max(
+                          0,
+                          Math.floor(
+                            (exit.endedAt.getTime() -
+                              exit.startedAt.getTime()) /
+                              60000,
+                          ),
+                        )
+                      : 0;
+
+                  return (
+                    <div
+                      key={exit.id}
+                      className="rounded-2xl bg-slate-50 px-3.5 py-3"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex min-w-0 items-center gap-2.5">
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-white text-slate-500 shadow-sm">
+                            <Icon
+                              size={15}
+                            />
+                          </div>
+
+                          <div className="min-w-0">
+                            <p className="truncate text-[11px] font-bold text-slate-700">
+                              {getTypeLabel(
+                                exit.type,
+                              )}
+                            </p>
+
+                            <p className="mt-0.5 text-[9px] text-slate-400">
+                              {formatTime(
+                                exit.startedAt,
+                              )}{" "}
+                              تا{" "}
+                              {exit.endedAt
+                                ? formatTime(
+                                    exit.endedAt,
+                                  )
+                                : "—"}
+                            </p>
+                          </div>
+                        </div>
+
+                        <span className="shrink-0 text-[10px] font-semibold text-slate-500">
+                          {formatMinutes(
+                            durationMinutes,
+                          )}
+                        </span>
+                      </div>
+
+                      {exit.reason ? (
+                        <p className="mt-2 rounded-xl bg-white/80 px-3 py-2 text-[10px] leading-5 text-slate-500">
+                          {exit.reason}
+                        </p>
+                      ) : null}
+                    </div>
+                  );
+                },
+              )}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+============================================================
+FILE: app\api\auth\login\route.ts
+============================================================
+import { NextResponse } from "next/server";
+import { z } from "zod";
+
+import { verifyPassword } from "@/lib/auth/password";
+import { createSession } from "@/lib/auth/session";
+import { prisma } from "@/lib/prisma";
+
+const loginSchema = z.object({
+  username: z
+    .string()
+    .trim()
+    .min(1, "نام کاربری الزامی است.")
+    .max(100),
+
+  password: z
+    .string()
+    .min(1, "رمز عبور الزامی است.")
+    .max(200),
+});
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+
+    const validation = loginSchema.safeParse(body);
+
+    if (!validation.success) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "اطلاعات ورود صحیح نیست.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    const {
+      username,
+      password,
+    } = validation.data;
+
+    const user = await prisma.user.findUnique({
+      where: {
+        username,
+      },
+    });
+
+    if (!user || !user.isActive) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "نام کاربری یا رمز عبور اشتباه است.",
+        },
+        {
+          status: 401,
+        },
+      );
+    }
+
+    const validPassword =
+      await verifyPassword(
+        password,
+        user.passwordHash,
+      );
+
+    if (!validPassword) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "نام کاربری یا رمز عبور اشتباه است.",
+        },
+        {
+          status: 401,
+        },
+      );
+    }
+
+    await createSession(user.id);
+
+    const redirectTo =
+      user.role === "ADMIN"
+        ? "/admin"
+        : "/employee";
+
+    return NextResponse.json({
+      success: true,
+
+      redirectTo,
+
+      user: {
+        id: user.id,
+        username: user.username,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        role: user.role,
+      },
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+
+    return NextResponse.json(
+      {
+        success: false,
+        message: "خطایی در ورود رخ داد.",
+      },
+      {
+        status: 500,
+      },
+    );
+  }
+}
+============================================================
+FILE: app\api\auth\logout\route.ts
+============================================================
+import { NextResponse } from "next/server";
+
+import { deleteCurrentSession } from "@/lib/auth/session";
+
+export async function POST() {
+  try {
+    await deleteCurrentSession();
+
+    return NextResponse.json({
+      success: true,
+    });
+  } catch (error) {
+    console.error("Logout error:", error);
+
+    return NextResponse.json(
+      {
+        success: false,
+        message: "خطا در خروج.",
+      },
+      {
+        status: 500,
+      },
+    );
+  }
+}
+============================================================
+FILE: app\login\page.tsx
+============================================================
+"use client";
+
+import { FormEvent, useState } from "react";
+import {
+  ArrowLeft,
+  Eye,
+  EyeOff,
+  Loader2,
+  LockKeyhole,
+  LogIn,
+  UserRound,
+} from "lucide-react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+
+export default function EmployeeLoginPage() {
+  const router = useRouter();
+
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+
+  const [showPassword, setShowPassword] =
+    useState(false);
+
+  const [loading, setLoading] =
+    useState(false);
+
+  const [error, setError] =
+    useState("");
+
+  async function handleSubmit(
+    event: FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+
+    setError("");
+    setLoading(true);
+
+    try {
+      const response = await fetch(
+        "/api/auth/login",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+          body: JSON.stringify({
+            username,
+            password,
+          }),
+        },
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(
+          data?.message ||
+            "نام کاربری یا رمز عبور اشتباه است.",
+        );
+
+        return;
+      }
+
+      router.replace(
+        data.redirectTo || "/employee",
+      );
+
+      router.refresh();
+    } catch {
+      setError(
+        "ارتباط با سرور برقرار نشد. دوباره تلاش کنید.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <main
+      dir="rtl"
+      className="
+        min-h-screen
+        bg-[#f6f7f9]
+        px-4 py-6
+        sm:px-6 sm:py-10
+      "
+    >
+      <div className="mx-auto flex min-h-[calc(100vh-3rem)] max-w-md items-center justify-center sm:min-h-[calc(100vh-5rem)]">
+        <div className="w-full overflow-hidden rounded-[30px] border border-black/5 bg-white shadow-[0_25px_80px_rgba(15,23,42,0.08)]">
+          <div className="p-6 sm:p-8">
+            <div className="mb-8">
+              <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-950 text-white shadow-lg shadow-slate-950/10">
+                <LogIn
+                  size={24}
+                  strokeWidth={2}
+                />
+              </div>
+
+              <h1 className="text-2xl font-bold tracking-tight text-slate-950">
+                ورود کارکنان
+              </h1>
+
+              <p className="mt-2 text-sm leading-6 text-slate-500">
+                برای ثبت حضور و مشاهده سوابق خود
+                وارد حساب کاربری شوید.
+              </p>
+            </div>
+
+            <form
+              onSubmit={handleSubmit}
+              className="space-y-5"
+            >
+              <div>
+                <label
+                  htmlFor="employee-username"
+                  className="mb-2 block text-sm font-semibold text-slate-700"
+                >
+                  نام کاربری
+                </label>
+
+                <div className="relative">
+                  <UserRound
+                    size={18}
+                    className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-slate-400"
+                  />
+
+                  <input
+                    id="employee-username"
+                    value={username}
+                    onChange={(event) =>
+                      setUsername(
+                        event.target.value,
+                      )
+                    }
+                    type="text"
+                    autoComplete="username"
+                    placeholder="نام کاربری شما"
+                    disabled={loading}
+                    className="
+                      h-13 w-full
+                      rounded-2xl
+                      border border-slate-200
+                      bg-slate-50
+                      pr-11 pl-4
+                      text-sm
+                      outline-none
+                      transition
+                      placeholder:text-slate-400
+                      focus:border-slate-400
+                      focus:bg-white
+                      focus:ring-4
+                      focus:ring-slate-900/5
+                    "
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="employee-password"
+                  className="mb-2 block text-sm font-semibold text-slate-700"
+                >
+                  رمز عبور
+                </label>
+
+                <div className="relative">
+                  <LockKeyhole
+                    size={18}
+                    className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-slate-400"
+                  />
+
+                  <input
+                    id="employee-password"
+                    value={password}
+                    onChange={(event) =>
+                      setPassword(
+                        event.target.value,
+                      )
+                    }
+                    type={
+                      showPassword
+                        ? "text"
+                        : "password"
+                    }
+                    autoComplete="current-password"
+                    placeholder="رمز عبور شما"
+                    disabled={loading}
+                    className="
+                      h-13 w-full
+                      rounded-2xl
+                      border border-slate-200
+                      bg-slate-50
+                      px-12
+                      text-sm
+                      outline-none
+                      transition
+                      placeholder:text-slate-400
+                      focus:border-slate-400
+                      focus:bg-white
+                      focus:ring-4
+                      focus:ring-slate-900/5
+                    "
+                  />
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setShowPassword(
+                        (value) => !value,
+                      )
+                    }
+                    disabled={loading}
+                    className="
+                      absolute left-3 top-1/2
+                      flex h-9 w-9
+                      -translate-y-1/2
+                      items-center justify-center
+                      rounded-xl
+                      text-slate-400
+                      transition
+                      hover:bg-slate-100
+                    "
+                    aria-label={
+                      showPassword
+                        ? "پنهان کردن رمز"
+                        : "نمایش رمز"
+                    }
+                  >
+                    {showPassword ? (
+                      <EyeOff size={18} />
+                    ) : (
+                      <Eye size={18} />
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {error ? (
+                <div
+                  role="alert"
+                  className="rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm leading-6 text-red-700"
+                >
+                  {error}
+                </div>
+              ) : null}
+
+              <button
+                type="submit"
+                disabled={
+                  loading ||
+                  !username.trim() ||
+                  !password
+                }
+                className="
+                  flex h-13 w-full
+                  items-center
+                  justify-center
+                  gap-2
+                  rounded-2xl
+                  bg-slate-950
+                  text-sm font-semibold
+                  text-white
+                  shadow-lg
+                  shadow-slate-950/10
+                  transition
+                  hover:bg-slate-800
+                  disabled:cursor-not-allowed
+                  disabled:opacity-50
+                "
+              >
+                {loading ? (
+                  <>
+                    <Loader2
+                      size={18}
+                      className="animate-spin"
+                    />
+                    در حال ورود...
+                  </>
+                ) : (
+                  <>
+                    ورود به حساب
+                    <ArrowLeft size={18} />
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+
+          <div className="border-t border-slate-100 bg-slate-50 px-6 py-4 text-center text-xs text-slate-400 sm:px-8">
+            سامانه حضور و غیاب
+          </div>
+        </div>
+      </div>
+    </main>
+  );
+}
+============================================================
+FILE: app\admin\login\page.tsx
+============================================================
+"use client";
+
+import { FormEvent, useState } from "react";
+import { Eye, EyeOff, Loader2, LockKeyhole, LogIn, UserRound } from "lucide-react";
+import { useRouter } from "next/navigation";
+
+export default function AdminLoginPage() {
+  const router = useRouter();
+
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+
+  const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    setError("");
+    setLoading(true);
+
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username,
+          password,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(
+          data?.message ||
+            "نام کاربری یا رمز عبور اشتباه است.",
+        );
+
+        return;
+      }
+
+      router.replace("/admin");
+      router.refresh();
+    } catch {
+      setError(
+        "ارتباط با سرور برقرار نشد. دوباره تلاش کنید.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <main
+      dir="rtl"
+      className="
+        min-h-screen
+        bg-[#f7f8fa]
+        px-4
+        py-8
+        sm:px-6
+      "
+    >
+      <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-md items-center justify-center">
+        <div
+          className="
+            w-full
+            overflow-hidden
+            rounded-[28px]
+            border
+            border-black/5
+            bg-white
+            shadow-[0_20px_70px_rgba(15,23,42,0.08)]
+          "
+        >
+          <div className="px-6 pb-8 pt-8 sm:px-8">
+            <div className="mb-8">
+              <div
+                className="
+                  mb-5
+                  flex
+                  h-14
+                  w-14
+                  items-center
+                  justify-center
+                  rounded-2xl
+                  bg-slate-900
+                  text-white
+                  shadow-lg
+                  shadow-slate-900/10
+                "
+              >
+                <LogIn size={24} strokeWidth={2} />
+              </div>
+
+              <h1 className="text-2xl font-bold tracking-tight text-slate-900">
+                ورود به پنل مدیریت
+              </h1>
+
+              <p className="mt-2 text-sm leading-6 text-slate-500">
+                برای مدیریت حضور و غیاب وارد حساب کاربری خود شوید.
+              </p>
+            </div>
+
+            <form
+              onSubmit={handleSubmit}
+              className="space-y-5"
+            >
+              <div>
+                <label
+                  htmlFor="username"
+                  className="mb-2 block text-sm font-medium text-slate-700"
+                >
+                  نام کاربری
+                </label>
+
+                <div className="relative">
+                  <UserRound
+                    size={18}
+                    className="
+                      pointer-events-none
+                      absolute
+                      right-4
+                      top-1/2
+                      -translate-y-1/2
+                      text-slate-400
+                    "
+                  />
+
+                  <input
+                    id="username"
+                    name="username"
+                    type="text"
+                    autoComplete="username"
+                    value={username}
+                    onChange={(event) =>
+                      setUsername(event.target.value)
+                    }
+                    placeholder="نام کاربری"
+                    disabled={loading}
+                    className="
+                      h-13
+                      w-full
+                      rounded-2xl
+                      border
+                      border-slate-200
+                      bg-slate-50
+                      pr-11
+                      pl-4
+                      text-sm
+                      text-slate-900
+                      outline-none
+                      transition
+                      placeholder:text-slate-400
+                      focus:border-slate-400
+                      focus:bg-white
+                      focus:ring-4
+                      focus:ring-slate-900/5
+                      disabled:cursor-not-allowed
+                      disabled:opacity-60
+                    "
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="password"
+                  className="mb-2 block text-sm font-medium text-slate-700"
+                >
+                  رمز عبور
+                </label>
+
+                <div className="relative">
+                  <LockKeyhole
+                    size={18}
+                    className="
+                      pointer-events-none
+                      absolute
+                      right-4
+                      top-1/2
+                      -translate-y-1/2
+                      text-slate-400
+                    "
+                  />
+
+                  <input
+                    id="password"
+                    name="password"
+                    type={
+                      showPassword ? "text" : "password"
+                    }
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(event) =>
+                      setPassword(event.target.value)
+                    }
+                    placeholder="رمز عبور"
+                    disabled={loading}
+                    className="
+                      h-13
+                      w-full
+                      rounded-2xl
+                      border
+                      border-slate-200
+                      bg-slate-50
+                      px-12
+                      text-sm
+                      text-slate-900
+                      outline-none
+                      transition
+                      placeholder:text-slate-400
+                      focus:border-slate-400
+                      focus:bg-white
+                      focus:ring-4
+                      focus:ring-slate-900/5
+                      disabled:cursor-not-allowed
+                      disabled:opacity-60
+                    "
+                  />
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setShowPassword((value) => !value)
+                    }
+                    disabled={loading}
+                    aria-label={
+                      showPassword
+                        ? "پنهان کردن رمز"
+                        : "نمایش رمز"
+                    }
+                    className="
+                      absolute
+                      left-3
+                      top-1/2
+                      flex
+                      h-9
+                      w-9
+                      -translate-y-1/2
+                      items-center
+                      justify-center
+                      rounded-xl
+                      text-slate-400
+                      transition
+                      hover:bg-slate-100
+                      hover:text-slate-700
+                    "
+                  >
+                    {showPassword ? (
+                      <EyeOff size={18} />
+                    ) : (
+                      <Eye size={18} />
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {error ? (
+                <div
+                  role="alert"
+                  className="
+                    rounded-2xl
+                    border
+                    border-red-100
+                    bg-red-50
+                    px-4
+                    py-3
+                    text-sm
+                    leading-6
+                    text-red-700
+                  "
+                >
+                  {error}
+                </div>
+              ) : null}
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="
+                  flex
+                  h-13
+                  w-full
+                  items-center
+                  justify-center
+                  gap-2
+                  rounded-2xl
+                  bg-slate-900
+                  px-5
+                  text-sm
+                  font-semibold
+                  text-white
+                  shadow-lg
+                  shadow-slate-900/10
+                  transition
+                  hover:bg-slate-800
+                  active:scale-[0.99]
+                  disabled:cursor-not-allowed
+                  disabled:opacity-60
+                "
+              >
+                {loading ? (
+                  <>
+                    <Loader2
+                      size={18}
+                      className="animate-spin"
+                    />
+                    در حال ورود...
+                  </>
+                ) : (
+                  <>
+                    ورود به پنل
+                    <LogIn size={18} />
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+
+          <div
+            className="
+              border-t
+              border-slate-100
+              bg-slate-50
+              px-6
+              py-4
+              text-center
+              text-xs
+              text-slate-400
+              sm:px-8
+            "
+          >
+            سامانه مدیریت حضور و غیاب
+          </div>
+        </div>
+      </div>
+    </main>
+  );
+}
+============================================================
+FILE: app\employee\page.tsx
+============================================================
+import {
+  CalendarDays,
+  CheckCircle2,
+  Clock3,
+  LogIn,
+  MinusCircle,
+  TriangleAlert,
+  UserX,
+} from "lucide-react";
+
+import EmployeeDuration from "./employee-duration";
+import EmployeeShell from "./employee-shell";
+import TemporaryExitPanel from "./temporary-exit-panel";
+
+import {
+  CheckInButton,
+  CheckOutButton,
+} from "./employee-actions";
+
+import { requireEmployee } from "@/lib/auth/current-user";
+
+import {
+  calculateAttendanceDay,
+  type AttendanceCalculation,
+  type AttendanceHoliday,
+  type AttendanceRecord as EngineAttendanceRecord,
+  type AttendanceSchedule,
+} from "@/lib/attendance/engine";
+
+import {
+  getDefaultAttendanceSchedule,
+  getEmployeeShiftAssignments,
+  resolveEmployeeSchedule,
+} from "@/lib/attendance/schedule-resolver";
+
+import {
+  formatDate,
+  formatTime,
+  getDateKey,
+  getDateRange,
+  getPersianWeekday,
+  getTodayRange,
+} from "@/lib/date/tehran";
+
+import { prisma } from "@/lib/prisma";
+
+type EmployeeCalculation =
+  AttendanceCalculation & {
+    state:
+      | AttendanceCalculation["state"]
+      | "LEAVE";
+  };
+
+type LeaveType =
+  | "ANNUAL"
+  | "SICK"
+  | "UNPAID"
+  | "OTHER";
+
+type LeaveRecord = {
+  id: string;
+  type: LeaveType;
+  startDate: Date;
+  endDate: Date;
+  reason: string | null;
+};
+
+type HistoryItem = {
+  id: string;
+  workDate: Date;
+  checkIn: Date | null;
+  checkOut: Date | null;
+  calculation: EmployeeCalculation;
+  leave: LeaveRecord | null;
+};
+
+function formatMinutes(
+  totalMinutes: number,
+): string {
+  if (totalMinutes <= 0) {
+    return "۰ دقیقه";
+  }
+
+  const hours = Math.floor(
+    totalMinutes / 60,
+  );
+
+  const minutes =
+    totalMinutes % 60;
+
+  if (hours === 0) {
+    return `${minutes} دقیقه`;
+  }
+
+  if (minutes === 0) {
+    return `${hours} ساعت`;
+  }
+
+  return `${hours} ساعت و ${minutes} دقیقه`;
+}
+
+function getStateText(
+  state: EmployeeCalculation["state"],
+): string {
+  switch (state) {
+    case "PRESENT":
+      return "حاضر";
+
+    case "WORKING":
+      return "در حال حضور";
+
+    case "ABSENT":
+      return "غایب";
+
+    case "HOLIDAY":
+      return "تعطیل";
+
+    case "NON_WORKING":
+      return "روز غیرکاری";
+
+    case "FUTURE":
+      return "آینده";
+
+    case "LEAVE":
+      return "مرخصی";
+
+    default:
+      return "نامشخص";
+  }
+}
+
+function getStateClass(
+  state: EmployeeCalculation["state"],
+): string {
+  switch (state) {
+    case "PRESENT":
+      return "bg-emerald-50 text-emerald-700";
+
+    case "WORKING":
+      return "bg-blue-50 text-blue-700";
+
+    case "ABSENT":
+      return "bg-rose-50 text-rose-700";
+
+    case "HOLIDAY":
+      return "bg-violet-50 text-violet-700";
+
+    case "NON_WORKING":
+      return "bg-slate-100 text-slate-600";
+
+    case "FUTURE":
+      return "bg-amber-50 text-amber-700";
+
+    case "LEAVE":
+      return "bg-violet-50 text-violet-700";
+
+    default:
+      return "bg-slate-100 text-slate-500";
+  }
+}
+
+function getStateIcon(
+  state: EmployeeCalculation["state"],
+) {
+  switch (state) {
+    case "PRESENT":
+      return CheckCircle2;
+
+    case "WORKING":
+      return Clock3;
+
+    case "ABSENT":
+      return UserX;
+
+    case "HOLIDAY":
+      return CalendarDays;
+
+    case "NON_WORKING":
+      return MinusCircle;
+
+    case "FUTURE":
+      return Clock3;
+
+    case "LEAVE":
+      return CalendarDays;
+
+    default:
+      return TriangleAlert;
+  }
+}
+
+function getLeaveTypeLabel(
+  type: LeaveType,
+): string {
+  switch (type) {
+    case "ANNUAL":
+      return "استحقاقی";
+
+    case "SICK":
+      return "استعلاجی";
+
+    case "UNPAID":
+      return "بدون حقوق";
+
+    case "OTHER":
+      return "سایر";
+  }
+}
+
+function toEngineAttendance(
+  attendance: {
+    workDate: Date;
+    checkIn: Date | null;
+    checkOut: Date | null;
+    status: string;
+    note: string | null;
+    temporaryExits?: Array<{
+      type: "TEMPORARY" | "MISSION";
+      status: "OPEN" | "COMPLETED";
+      startedAt: Date;
+      endedAt: Date | null;
+    }>;
+  } | null,
+): EngineAttendanceRecord | null {
+  if (!attendance) {
+    return null;
+  }
+
+  return {
+    workDate: attendance.workDate,
+    checkIn: attendance.checkIn,
+    checkOut: attendance.checkOut,
+    status: attendance.status,
+    note: attendance.note,
+    temporaryExits:
+      attendance.temporaryExits?.map(
+        (exit) => ({
+          type: exit.type,
+          status: exit.status,
+          startedAt: exit.startedAt,
+          endedAt: exit.endedAt,
+        }),
+      ) ?? [],
+  } as EngineAttendanceRecord;
+}
+
+function toEngineHoliday(
+  holiday: {
+    date: Date;
+    title: string;
+    description: string | null;
+  } | null,
+): AttendanceHoliday | null {
+  if (!holiday) {
+    return null;
+  }
+
+  return {
+    workDate: holiday.date,
+    title: holiday.title,
+    description: holiday.description,
+  } as AttendanceHoliday;
+}
+
+function createLeaveCalculation(
+  calculation: AttendanceCalculation,
+): EmployeeCalculation {
+  return {
+    ...calculation,
+    state: "LEAVE",
+    checkIn: null,
+    checkOut: null,
+    workedMinutes: 0,
+    scheduledMinutes: 0,
+    lateMinutes: 0,
+    earlyLeaveMinutes: 0,
+    overtimeMinutes: 0,
+    underworkMinutes: 0,
+    balanceMinutes: 0,
+    hasAttendance: false,
+    isComplete: false,
+    attendanceStatus: null,
+    note: null,
+  };
+}
+
+function leaveCoversDate(
+  leave: LeaveRecord,
+  dateKey: string,
+): boolean {
+  const range =
+    getDateRange(dateKey);
+
+  if (!range) {
+    return false;
+  }
+
+  return (
+    leave.startDate < range.end &&
+    leave.endDate >= range.start
+  );
+}
+
+function getLeaveForDate(
+  leaves: LeaveRecord[],
+  dateKey: string,
+): LeaveRecord | null {
+  return (
+    leaves.find((leave) =>
+      leaveCoversDate(
+        leave,
+        dateKey,
+      ),
+    ) ?? null
+  );
+}
+
+function isApprovedLeaveDay(
+  calculation: AttendanceCalculation,
+  attendance: {
+    checkIn: Date | null;
+    checkOut: Date | null;
+  } | null,
+  leave: LeaveRecord | null,
+): boolean {
+  return Boolean(
+    leave &&
+      !attendance &&
+      calculation.isWorkingDay &&
+      !calculation.isHoliday &&
+      !calculation.isFuture,
+  );
+}
+
+export default async function EmployeePage() {
+  const user =
+    await requireEmployee();
+
+  const {
+    start,
+    end,
+  } = getTodayRange();
+
+  const [
+    todayAttendance,
+    historyRecords,
+    settings,
+    todayHoliday,
+    todayLeaves,
+    recentLeaves,
+  ] = await Promise.all([
+    prisma.attendance.findUnique({
+      where: {
+        userId_workDate: {
+          userId: user.id,
+          workDate: start,
+        },
+      },
+
+      include: {
+        temporaryExits: {
+          orderBy: {
+            startedAt: "asc",
+          },
+
+          select: {
+            type: true,
+            status: true,
+            startedAt: true,
+            endedAt: true,
+          },
+        },
+      },
+    }),
+
+    prisma.attendance.findMany({
+      where: {
+        userId: user.id,
+        workDate: {
+          lt: end,
+        },
+      },
+      orderBy: {
+        workDate: "desc",
+      },
+      take: 20,
+
+      include: {
+        temporaryExits: {
+          orderBy: {
+            startedAt: "asc",
+          },
+
+          select: {
+            type: true,
+            status: true,
+            startedAt: true,
+            endedAt: true,
+          },
+        },
+      },
+    }),
+
+    prisma.companySettings.findUnique({
+      where: {
+        id: "company",
+      },
+    }),
+
+    prisma.holiday.findUnique({
+      where: {
+        date: start,
+      },
+    }),
+
+    prisma.leave.findMany({
+      where: {
+        userId: user.id,
+        status: "APPROVED",
+        startDate: {
+          lt: end,
+        },
+        endDate: {
+          gte: start,
+        },
+      },
+      orderBy: {
+        startDate: "asc",
+      },
+      select: {
+        id: true,
+        type: true,
+        startDate: true,
+        endDate: true,
+        reason: true,
+      },
+    }),
+
+    prisma.leave.findMany({
+      where: {
+        userId: user.id,
+        status: "APPROVED",
+        endDate: {
+          lt: end,
+        },
+      },
+      orderBy: {
+        startDate: "desc",
+      },
+      take: 20,
+      select: {
+        id: true,
+        type: true,
+        startDate: true,
+        endDate: true,
+        reason: true,
+      },
+    }),
+  ]);
+
+  const fallbackSchedule:
+    AttendanceSchedule =
+    getDefaultAttendanceSchedule(
+      settings,
+    );
+
+  const normalizedTodayLeaves: LeaveRecord[] =
+    todayLeaves.map((leave) => ({
+      ...leave,
+      type: leave.type as LeaveType,
+    }));
+
+  const normalizedRecentLeaves: LeaveRecord[] =
+    recentLeaves.map((leave) => ({
+      ...leave,
+      type: leave.type as LeaveType,
+    }));
+
+  const todayLeave =
+    getLeaveForDate(
+      normalizedTodayLeaves,
+      getDateKey(start),
+    );
+
+  const oldestAttendanceDate =
+    historyRecords.length > 0
+      ? historyRecords[
+          historyRecords.length - 1
+        ].workDate
+      : null;
+
+  const oldestLeaveDate =
+    [
+      ...normalizedTodayLeaves,
+      ...normalizedRecentLeaves,
+    ].reduce<Date | null>(
+      (oldest, leave) => {
+        if (
+          !oldest ||
+          leave.startDate.getTime() <
+            oldest.getTime()
+        ) {
+          return leave.startDate;
+        }
+
+        return oldest;
+      },
+      null,
+    );
+
+  const oldestRelevantDate =
+    [
+      oldestAttendanceDate,
+      oldestLeaveDate,
+    ].reduce<Date | null>(
+      (oldest, date) => {
+        if (!date) {
+          return oldest;
+        }
+
+        if (
+          !oldest ||
+          date.getTime() <
+            oldest.getTime()
+        ) {
+          return date;
+        }
+
+        return oldest;
+      },
+      null,
+    ) ?? start;
+
+  const shiftAssignments =
+    await getEmployeeShiftAssignments({
+      userIds: [user.id],
+      from:
+        oldestRelevantDate,
+      to: end,
+    });
+
+  const todaySchedule =
+    resolveEmployeeSchedule({
+      assignments:
+        shiftAssignments,
+      userId: user.id,
+      workDate: start,
+      fallbackSchedule,
+    });
+
+  const rawTodayCalculation =
+    calculateAttendanceDay({
+      workDate: start,
+      schedule: todaySchedule,
+      holiday:
+        toEngineHoliday(
+          todayHoliday,
+        ),
+      attendance:
+        toEngineAttendance(
+          todayAttendance,
+        ),
+    });
+
+  const todayIsLeave =
+    isApprovedLeaveDay(
+      rawTodayCalculation,
+      todayAttendance,
+      todayLeave,
+    );
+
+  const todayCalculation:
+    EmployeeCalculation =
+    todayIsLeave
+      ? createLeaveCalculation(
+          rawTodayCalculation,
+        )
+      : rawTodayCalculation;
+
+  let historyHolidays: {
+    date: Date;
+    title: string;
+    description: string | null;
+  }[] = [];
+
+  if (oldestRelevantDate) {
+    historyHolidays =
+      await prisma.holiday.findMany({
+        where: {
+          date: {
+            gte: oldestRelevantDate,
+            lt: end,
+          },
+        },
+        orderBy: {
+          date: "asc",
+        },
+      });
+  }
+
+  const holidayMap =
+    new Map<
+      string,
+      AttendanceHoliday
+    >();
+
+  for (const holiday of historyHolidays) {
+    holidayMap.set(
+      getDateKey(holiday.date),
+      toEngineHoliday(
+        holiday,
+      )!,
+    );
+  }
+
+  const historyLeaveUnique =
+    new Map<
+      string,
+      LeaveRecord
+    >();
+
+  const historyLeaves = [
+    ...normalizedRecentLeaves,
+    ...normalizedTodayLeaves,
+  ];
+
+  for (const leave of historyLeaves) {
+    historyLeaveUnique.set(
+      leave.id,
+      leave,
+    );
+  }
+
+  const historyByDate =
+    new Map<
+      string,
+      HistoryItem
+    >();
+
+  for (const item of historyRecords) {
+    const dateKey =
+      getDateKey(
+        item.workDate,
+      );
+
+    const range =
+      getDateRange(
+        dateKey,
+      );
+
+    const holiday =
+      holidayMap.get(
+        dateKey,
+      ) ?? null;
+
+    const itemSchedule =
+      resolveEmployeeSchedule({
+        assignments:
+          shiftAssignments,
+        userId: user.id,
+        workDate:
+          range?.start ??
+          item.workDate,
+        fallbackSchedule,
+      });
+
+    const rawCalculation =
+      calculateAttendanceDay({
+        workDate:
+          range?.start ??
+          item.workDate,
+        schedule:
+          itemSchedule,
+        holiday,
+        attendance:
+          toEngineAttendance(
+            item,
+          ),
+      });
+
+    const leave =
+      getLeaveForDate(
+        Array.from(
+          historyLeaveUnique.values(),
+        ),
+        dateKey,
+      );
+
+    const isLeave =
+      isApprovedLeaveDay(
+        rawCalculation,
+        item,
+        leave,
+      );
+
+    const calculation:
+      EmployeeCalculation =
+      isLeave
+        ? createLeaveCalculation(
+            rawCalculation,
+          )
+        : rawCalculation;
+
+    historyByDate.set(
+      dateKey,
+      {
+        id: item.id,
+        workDate:
+          item.workDate,
+        checkIn:
+          item.checkIn,
+        checkOut:
+          item.checkOut,
+        calculation,
+        leave: isLeave
+          ? leave
+          : null,
+      },
+    );
+  }
+
+  for (const leave of historyLeaveUnique.values()) {
+    const cursor =
+      new Date(leave.startDate);
+
+    const safeCursorEnd =
+      new Date(
+        Math.min(
+          leave.endDate.getTime(),
+          end.getTime() - 1,
+        ),
+      );
+
+    while (
+      cursor <=
+      safeCursorEnd
+    ) {
+      const dateKey =
+        getDateKey(cursor);
+
+      if (
+        !historyByDate.has(
+          dateKey,
+        )
+      ) {
+        const range =
+          getDateRange(
+            dateKey,
+          );
+
+        if (range) {
+          const holiday =
+            holidayMap.get(
+              dateKey,
+            ) ?? null;
+
+          const daySchedule =
+            resolveEmployeeSchedule({
+              assignments:
+                shiftAssignments,
+              userId:
+                user.id,
+              workDate:
+                range.start,
+              fallbackSchedule,
+            });
+
+          const rawCalculation =
+            calculateAttendanceDay({
+              workDate:
+                range.start,
+              schedule:
+                daySchedule,
+              holiday,
+              attendance: null,
+            });
+
+          const isLeave =
+            isApprovedLeaveDay(
+              rawCalculation,
+              null,
+              leave,
+            );
+
+          if (isLeave) {
+            historyByDate.set(
+              dateKey,
+              {
+                id: `leave-${leave.id}-${dateKey}`,
+                workDate:
+                  range.start,
+                checkIn: null,
+                checkOut: null,
+                calculation:
+                  createLeaveCalculation(
+                    rawCalculation,
+                  ),
+                leave,
+              },
+            );
+          }
+        }
+      }
+
+      cursor.setDate(
+        cursor.getDate() + 1,
+      );
+    }
+  }
+
+  const history:
+    HistoryItem[] =
+    Array.from(
+      historyByDate.values(),
+    )
+      .sort(
+        (a, b) =>
+          b.workDate.getTime() -
+          a.workDate.getTime(),
+      )
+      .slice(0, 20);
+
+  const hasCheckedIn =
+    Boolean(
+      todayCalculation.checkIn,
+    );
+
+  const hasCheckedOut =
+    Boolean(
+      todayCalculation.checkOut,
+    );
+
+  const isWorking =
+    todayCalculation.state ===
+    "WORKING";
+
+  const isCompleted =
+    todayCalculation.state ===
+    "PRESENT";
+
+  const isHoliday =
+    todayCalculation.state ===
+    "HOLIDAY";
+
+  const isNonWorking =
+    todayCalculation.state ===
+    "NON_WORKING";
+
+  const isLeave =
+    todayCalculation.state ===
+    "LEAVE";
+
+  const todayLabel =
+    `${getPersianWeekday(
+      new Date(),
+    )}، ${formatDate(
+      new Date(),
+    )}`;
+
+  return (
+    <EmployeeShell
+      firstName={
+        user.firstName
+      }
+      lastName={
+        user.lastName
+      }
+    >
+      <section>
+        <p className="text-sm font-medium text-slate-400">
+          {todayLabel}
+        </p>
+
+        <h1 className="mt-2 text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl">
+          سلام، {user.firstName} 👋
+        </h1>
+
+        <p className="mt-2 text-sm leading-6 text-slate-500">
+          وضعیت حضور امروز خود را از اینجا مدیریت کنید.
+        </p>
+      </section>
+
+      <section className="mt-5 overflow-hidden rounded-[30px] border border-slate-200/80 bg-white shadow-[0_15px_50px_rgba(15,23,42,0.06)]">
+        {isLeave ? (
+          <div className="p-5 sm:p-7">
+            <div className="flex items-start gap-4">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-violet-50 text-violet-600">
+                <CalendarDays
+                  size={22}
+                />
+              </div>
+
+              <div className="min-w-0">
+                <div className="inline-flex items-center rounded-full bg-violet-50 px-3 py-1.5 text-[11px] font-semibold text-violet-700">
+                  مرخصی تایید شده
+                </div>
+
+                <h2 className="mt-4 text-xl font-bold text-slate-950">
+                  امروز در مرخصی هستید
+                </h2>
+
+                <p className="mt-2 text-sm leading-6 text-slate-500">
+                  {todayLeave
+                    ? getLeaveTypeLabel(
+                        todayLeave.type,
+                      )
+                    : "مرخصی ثبت‌شده"}
+                </p>
+
+                {todayLeave?.reason ? (
+                  <div className="mt-4 rounded-2xl bg-slate-50 px-4 py-3">
+                    <p className="text-[10px] font-semibold text-slate-400">
+                      دلیل مرخصی
+                    </p>
+
+                    <p className="mt-1 text-xs leading-6 text-slate-600">
+                      {
+                        todayLeave.reason
+                      }
+                    </p>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : isHoliday ? (
+          <div className="p-5 sm:p-7">
+            <div className="flex items-start gap-4">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-violet-50 text-violet-600">
+                <CalendarDays
+                  size={22}
+                />
+              </div>
+
+              <div>
+                <div className="inline-flex items-center rounded-full bg-violet-50 px-3 py-1.5 text-[11px] font-semibold text-violet-700">
+                  روز تعطیل
+                </div>
+
+                <h2 className="mt-4 text-xl font-bold text-slate-950">
+                  امروز تعطیل است
+                </h2>
+
+                <p className="mt-2 text-sm leading-6 text-slate-500">
+                  {todayCalculation.holiday?.title ??
+                    "امروز در تقویم شرکت تعطیل ثبت شده است."}
+                </p>
+
+                {todayCalculation
+                  .holiday
+                  ?.description ? (
+                  <p className="mt-2 text-xs leading-5 text-slate-400">
+                    {
+                      todayCalculation
+                        .holiday
+                        .description
+                    }
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : isNonWorking ? (
+          <div className="p-5 sm:p-7">
+            <div className="flex items-start gap-4">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-500">
+                <MinusCircle
+                  size={22}
+                />
+              </div>
+
+              <div>
+                <div className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1.5 text-[11px] font-semibold text-slate-600">
+                  روز غیرکاری
+                </div>
+
+                <h2 className="mt-4 text-xl font-bold text-slate-950">
+                  امروز در برنامه کاری نیست
+                </h2>
+
+                <p className="mt-2 text-sm leading-6 text-slate-500">
+                  امروز طبق برنامه کاری شرکت روز کاری محسوب نمی‌شود.
+                </p>
+              </div>
+            </div>
+          </div>
+        ) : isWorking ? (
+          <div className="p-5 sm:p-7">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="inline-flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-semibold text-emerald-700">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+                  در حال حضور
+                </div>
+
+                <h2 className="mt-5 text-xl font-bold text-slate-950">
+                  شما داخل شرکت هستید
+                </h2>
+
+                <p className="mt-2 text-xs leading-5 text-slate-400">
+                  زمان حضور شما از لحظه ورود در حال محاسبه است.
+                </p>
+              </div>
+
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600">
+                <Clock3
+                  size={21}
+                />
+              </div>
+            </div>
+
+            <div className="mt-8 grid grid-cols-2 gap-3">
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <div className="flex items-center gap-2 text-xs text-slate-400">
+                  <LogIn size={14} />
+                  ورود
+                </div>
+
+                <p className="mt-2 text-lg font-bold text-slate-950">
+                  {formatTime(
+                    todayCalculation.checkIn,
+                  )}
+                </p>
+              </div>
+
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <div className="flex items-center gap-2 text-xs text-slate-400">
+                  <Clock3 size={14} />
+                  مدت حضور
+                </div>
+
+                {todayCalculation.checkIn ? (
+                  <div className="mt-2">
+                    <EmployeeDuration
+                      checkIn={todayCalculation.checkIn.toISOString()}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="mt-5">
+              <CheckOutButton />
+            </div>
+          </div>
+        ) : isCompleted ? (
+          <div className="p-5 sm:p-7">
+            <div className="flex items-start gap-4">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-blue-600">
+                <CheckCircle2
+                  size={22}
+                />
+              </div>
+
+              <div>
+                <div className="inline-flex items-center rounded-full bg-blue-50 px-3 py-1.5 text-[11px] font-semibold text-blue-700">
+                  روز کاری تکمیل شد
+                </div>
+
+                <h2 className="mt-4 text-xl font-bold text-slate-950">
+                  امروز خداقوت! 👏
+                </h2>
+
+                <p className="mt-2 text-sm leading-6 text-slate-500">
+                  حضور امروز شما به‌طور کامل ثبت شده است.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-7 grid grid-cols-3 gap-2 sm:gap-3">
+              <TimeBox
+                label="ورود"
+                value={formatTime(
+                  todayCalculation.checkIn,
+                )}
+              />
+
+              <TimeBox
+                label="خروج"
+                value={formatTime(
+                  todayCalculation.checkOut,
+                )}
+              />
+
+              <TimeBox
+                label="مدت"
+                value={formatMinutes(
+                  todayCalculation.workedMinutes,
+                )}
+                compact
+              />
+            </div>
+          </div>
+        ) : (
+          <div className="p-5 sm:p-7">
+            <div className="relative overflow-hidden rounded-[26px] bg-slate-950 p-6 text-white sm:p-8">
+              <div className="absolute -left-16 -top-16 h-52 w-52 rounded-full bg-blue-500/20 blur-3xl" />
+
+              <div className="relative">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/10">
+                  <LogIn size={21} />
+                </div>
+
+                <h2 className="mt-6 text-2xl font-bold">
+                  هنوز حضور نزده‌اید
+                </h2>
+
+                <p className="mt-2 max-w-md text-sm leading-6 text-slate-400">
+                  برای شروع ثبت ساعت کاری، ورود خود را ثبت کنید.
+                </p>
+
+                <div className="mt-6">
+                  <CheckInButton />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {todayAttendance &&
+      (isWorking || isCompleted) ? (
+        <TemporaryExitPanel
+          attendanceId={
+            todayAttendance.id
+          }
+        />
+      ) : null}
+
+      <section className="mt-4 grid grid-cols-3 gap-2 sm:gap-3">
+        <TimeBox
+          label="ورود امروز"
+          value={formatTime(
+            todayCalculation.checkIn,
+          )}
+        />
+
+        <TimeBox
+          label="خروج امروز"
+          value={formatTime(
+            todayCalculation.checkOut,
+          )}
+        />
+
+        <TimeBox
+          label="وضعیت"
+          value={getStateText(
+            todayCalculation.state,
+          )}
+          compact
+        />
+      </section>
+
+      <section className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <TimeBox
+          label="کارکرد"
+          value={formatMinutes(
+            todayCalculation.workedMinutes,
+          )}
+          compact
+        />
+
+        <TimeBox
+          label="موظفی"
+          value={formatMinutes(
+            todayCalculation.scheduledMinutes,
+          )}
+          compact
+        />
+
+        <TimeBox
+          label="تأخیر"
+          value={formatMinutes(
+            todayCalculation.lateMinutes,
+          )}
+          compact
+        />
+
+        <TimeBox
+          label="تراز"
+          value={
+            todayCalculation.balanceMinutes >
+            0
+              ? `+${formatMinutes(
+                  todayCalculation.balanceMinutes,
+                )}`
+              : formatMinutes(
+                  Math.abs(
+                    todayCalculation.balanceMinutes,
+                  ),
+                ) === "۰ دقیقه"
+                ? "۰ دقیقه"
+                : `-${formatMinutes(
+                    Math.abs(
+                      todayCalculation.balanceMinutes,
+                    ),
+                  )}`
+          }
+          compact
+        />
+      </section>
+
+      <section className="mt-5 overflow-hidden rounded-[26px] border border-slate-200/80 bg-white shadow-[0_10px_35px_rgba(15,23,42,0.04)]">
+        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-5">
+          <div>
+            <h2 className="text-base font-bold text-slate-950">
+              تاریخچه حضور
+            </h2>
+
+            <p className="mt-1 text-xs text-slate-400">
+              آخرین ۲۰ وضعیت حضور و مرخصی شما
+            </p>
+          </div>
+
+          <CalendarDays
+            size={19}
+            className="text-slate-300"
+          />
+        </div>
+
+        {history.length === 0 ? (
+          <div className="px-5 py-12 text-center">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-50 text-slate-300">
+              <CalendarDays
+                size={24}
+              />
+            </div>
+
+            <p className="mt-4 text-sm font-semibold text-slate-700">
+              هنوز سابقه‌ای ندارید
+            </p>
+
+            <p className="mt-2 text-xs text-slate-400">
+              اولین ورود یا مرخصی شما اینجا نمایش داده خواهد شد.
+            </p>
+          </div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {history.map(
+              (item) => {
+                const StateIcon =
+                  getStateIcon(
+                    item.calculation
+                      .state,
+                  );
+
+                const isHistoryLeave =
+                  item.calculation
+                    .state ===
+                  "LEAVE";
+
+                return (
+                  <div
+                    key={item.id}
+                    className={`px-5 py-4 ${
+                      isHistoryLeave
+                        ? "bg-violet-50/30"
+                        : ""
+                    }`}
+                  >
+                    <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto_auto] sm:items-center sm:gap-5">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="truncate text-sm font-bold text-slate-900">
+                            {formatDate(
+                              item.workDate,
+                            )}
+                          </p>
+
+                          <span
+                            className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[9px] font-semibold ${getStateClass(
+                              item.calculation
+                                .state,
+                            )}`}
+                          >
+                            <StateIcon
+                              size={11}
+                            />
+
+                            {getStateText(
+                              item.calculation
+                                .state,
+                            )}
+                          </span>
+
+                          {isHistoryLeave &&
+                          item.leave ? (
+                            <span className="rounded-full bg-violet-100 px-2.5 py-1 text-[9px] font-semibold text-violet-700">
+                              {getLeaveTypeLabel(
+                                item.leave.type,
+                              )}
+                            </span>
+                          ) : null}
+                        </div>
+
+                        <p className="mt-1 text-[11px] text-slate-400">
+                          {getPersianWeekday(
+                            item.workDate,
+                          )}
+                        </p>
+                      </div>
+
+                      <div className="text-left">
+                        <p className="text-[10px] text-slate-400">
+                          ورود
+                        </p>
+
+                        <p className="mt-1 text-xs font-semibold text-slate-700">
+                          {isHistoryLeave
+                            ? "—"
+                            : formatTime(
+                                item.calculation
+                                  .checkIn,
+                              )}
+                        </p>
+                      </div>
+
+                      <div className="text-left">
+                        <p className="text-[10px] text-slate-400">
+                          خروج
+                        </p>
+
+                        <p className="mt-1 text-xs font-semibold text-slate-700">
+                          {isHistoryLeave
+                            ? "—"
+                            : formatTime(
+                                item.calculation
+                                  .checkOut,
+                              )}
+                        </p>
+                      </div>
+
+                      <div className="text-left sm:min-w-[100px]">
+                        <p className="text-[10px] text-slate-400">
+                          {isHistoryLeave
+                            ? "وضعیت"
+                            : "کارکرد"}
+                        </p>
+
+                        <p className="mt-1 text-xs font-semibold text-slate-700">
+                          {isHistoryLeave
+                            ? getLeaveTypeLabel(
+                                item.leave
+                                  ?.type ??
+                                  "OTHER",
+                              )
+                            : formatMinutes(
+                                item.calculation
+                                  .workedMinutes,
+                              )}
+                        </p>
+                      </div>
+                    </div>
+
+                    {isHistoryLeave &&
+                    item.leave?.reason ? (
+                      <div className="mt-3 rounded-2xl bg-white/70 px-3.5 py-3">
+                        <p className="text-[10px] font-semibold text-slate-400">
+                          دلیل مرخصی
+                        </p>
+
+                        <p className="mt-1 text-[11px] leading-6 text-slate-500">
+                          {
+                            item.leave.reason
+                          }
+                        </p>
+                      </div>
+                    ) : null}
+
+                    {!isHistoryLeave &&
+                    (
+                      item.calculation
+                        .lateMinutes > 0 ||
+                      item.calculation
+                        .earlyLeaveMinutes >
+                        0 ||
+                      item.calculation
+                        .overtimeMinutes >
+                        0
+                    ) ? (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {item.calculation
+                          .lateMinutes >
+                        0 ? (
+                          <MiniMetric
+                            label="تأخیر"
+                            value={formatMinutes(
+                              item.calculation
+                                .lateMinutes,
+                            )}
+                            className="bg-amber-50 text-amber-700"
+                          />
+                        ) : null}
+
+                        {item.calculation
+                          .earlyLeaveMinutes >
+                        0 ? (
+                          <MiniMetric
+                            label="تعجیل"
+                            value={formatMinutes(
+                              item.calculation
+                                .earlyLeaveMinutes,
+                            )}
+                            className="bg-rose-50 text-rose-700"
+                          />
+                        ) : null}
+
+                        {item.calculation
+                          .overtimeMinutes >
+                        0 ? (
+                          <MiniMetric
+                            label="اضافه‌کاری"
+                            value={formatMinutes(
+                              item.calculation
+                                .overtimeMinutes,
+                            )}
+                            className="bg-emerald-50 text-emerald-700"
+                          />
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              },
+            )}
+          </div>
+        )}
+      </section>
+
+      <p className="mt-6 text-center text-[11px] text-slate-400">
+        ثبت حضور و غیاب به‌صورت امن در سیستم ذخیره می‌شود.
+      </p>
+    </EmployeeShell>
+  );
+}
+
+function TimeBox({
+  label,
+  value,
+  compact = false,
+}: {
+  label: string;
+  value: string;
+  compact?: boolean;
+}) {
+  return (
+    <div className="min-w-0 rounded-2xl border border-slate-200/80 bg-white p-3.5 sm:p-4">
+      <p className="truncate text-[10px] font-medium text-slate-400 sm:text-xs">
+        {label}
+      </p>
+
+      <p
+        className={`mt-2 break-words font-bold text-slate-900 ${
+          compact
+            ? "text-sm sm:text-base"
+            : "text-base sm:text-lg"
+        }`}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function MiniMetric({
+  label,
+  value,
+  className,
+}: {
+  label: string;
+  value: string;
+  className: string;
+}) {
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-3 py-1.5 text-[10px] font-semibold ${className}`}
+    >
+      {label}: {value}
+    </span>
+  );
+}
+============================================================
+FILE: app\employee\employee-shell.tsx
+============================================================
+"use client";
+
+import type { ReactNode } from "react";
+
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import {
+  CalendarCheck2,
+  CalendarDays,
+  ClipboardCheck,
+  Clock3,
+  Home,
+} from "lucide-react";
+
+import LogoutButton from "@/components/admin/logout-button";
+
+type EmployeeShellProps = {
+  firstName: string;
+  lastName: string;
+  children: ReactNode;
+};
+
+const navigation = [
+  {
+    label: "داشبورد",
+    description: "وضعیت حضور امروز",
+    href: "/employee",
+    icon: Home,
+  },
+  {
+    label: "مرخصی‌ها",
+    description: "درخواست‌های پرسنلی",
+    href: "/employee/leave",
+    icon: CalendarCheck2,
+  },
+];
+
+export default function EmployeeShell({
+  firstName,
+  lastName,
+  children,
+}: EmployeeShellProps) {
+  const pathname = usePathname();
+
+  return (
+    <div
+      dir="rtl"
+      className="min-h-screen bg-[#f6f7f9]"
+    >
+      <div className="min-h-screen lg:flex">
+        {/* Desktop Sidebar */}
+        <aside
+          className="
+            hidden
+            h-screen
+            w-[270px]
+            shrink-0
+            border-l
+            border-slate-200/80
+            bg-white
+            lg:flex
+            lg:flex-col
+          "
+        >
+          <div className="flex h-full flex-col p-4">
+            {/* Brand */}
+            <div className="px-2 pb-6 pt-2">
+              <Link
+                href="/employee"
+                className="group flex items-center gap-3 rounded-2xl px-2 py-2 transition hover:bg-slate-50"
+              >
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[15px] bg-slate-950 text-white shadow-lg shadow-slate-950/10 transition group-hover:scale-[1.02]">
+                  <Clock3
+                    size={21}
+                    strokeWidth={2.2}
+                  />
+                </div>
+
+                <div className="min-w-0">
+                  <p className="text-[15px] font-bold tracking-tight text-slate-950">
+                    حضورینو
+                  </p>
+
+                  <p className="mt-0.5 text-[11px] text-slate-400">
+                    پنل کارمند
+                  </p>
+                </div>
+              </Link>
+            </div>
+
+            {/* Navigation */}
+            <nav
+              aria-label="ناوبری پنل کارمند"
+              className="min-h-0 flex-1"
+            >
+              <p className="mb-3 px-3 text-[10px] font-bold tracking-wide text-slate-400">
+                پنل کاربری
+              </p>
+
+              <div className="space-y-1">
+                {navigation.map(
+                  (item) => {
+                    const Icon = item.icon;
+
+                    const isActive =
+                      item.href ===
+                      "/employee"
+                        ? pathname ===
+                          "/employee"
+                        : pathname.startsWith(
+                            item.href,
+                          );
+
+                    return (
+                      <Link
+                        key={item.href}
+                        href={item.href}
+                        aria-current={
+                          isActive
+                            ? "page"
+                            : undefined
+                        }
+                        className={`group relative flex items-center gap-3 rounded-2xl px-3 py-3 transition-all duration-200 ${
+                          isActive
+                            ? "bg-slate-950 text-white shadow-[0_10px_25px_rgba(15,23,42,0.14)]"
+                            : "text-slate-500 hover:bg-slate-50 hover:text-slate-950"
+                        }`}
+                      >
+                        {isActive ? (
+                          <span className="absolute right-0 top-1/2 h-7 w-1 -translate-y-1/2 rounded-l-full bg-white/90" />
+                        ) : null}
+
+                        <div
+                          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] transition ${
+                            isActive
+                              ? "bg-white/10"
+                              : "bg-slate-50 group-hover:bg-white"
+                          }`}
+                        >
+                          <Icon
+                            size={18}
+                            strokeWidth={
+                              isActive
+                                ? 2.3
+                                : 1.9
+                            }
+                            className={
+                              isActive
+                                ? "text-white"
+                                : "text-slate-400 transition-colors group-hover:text-slate-700"
+                            }
+                          />
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-semibold">
+                            {item.label}
+                          </p>
+
+                          <p
+                            className={`mt-0.5 truncate text-[10px] ${
+                              isActive
+                                ? "text-slate-400"
+                                : "text-slate-400 group-hover:text-slate-500"
+                            }`}
+                          >
+                            {
+                              item.description
+                            }
+                          </p>
+                        </div>
+                      </Link>
+                    );
+                  },
+                )}
+              </div>
+            </nav>
+
+            {/* User */}
+            <div className="mt-4 space-y-3">
+              <div className="rounded-[22px] border border-slate-100 bg-slate-50 p-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-sm font-bold text-slate-800 shadow-sm">
+                    {firstName?.[0] ||
+                      ""}
+                    {lastName?.[0] ||
+                      ""}
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-bold text-slate-900">
+                      {firstName}{" "}
+                      {lastName}
+                    </p>
+
+                    <div className="mt-1 flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+
+                      <p className="text-[10px] font-medium text-slate-400">
+                        حساب کارمند
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <LogoutButton />
+            </div>
+          </div>
+        </aside>
+
+        {/* Main Area */}
+        <div className="min-w-0 flex-1">
+          <header className="sticky top-0 z-40 border-b border-slate-200/80 bg-white/95 backdrop-blur-xl">
+            <div className="mx-auto flex h-16 max-w-3xl items-center justify-between px-4 sm:px-6 lg:max-w-5xl lg:px-8">
+              <div className="flex items-center gap-3 lg:hidden">
+                <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-950 text-white">
+                  <Clock3 size={18} />
+                </div>
+
+                <div>
+                  <p className="text-sm font-bold text-slate-950">
+                    حضورینو
+                  </p>
+
+                  <p className="text-[10px] text-slate-400">
+                    پنل کارمند
+                  </p>
+                </div>
+              </div>
+
+              <div className="hidden lg:flex lg:items-center lg:gap-2">
+                <ClipboardCheck
+                  size={17}
+                  className="text-slate-300"
+                />
+
+                <span className="text-xs font-medium text-slate-400">
+                  سامانه حضور و غیاب
+                </span>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <div className="hidden text-left sm:block">
+                  <p className="text-xs font-bold text-slate-900">
+                    {firstName}{" "}
+                    {lastName}
+                  </p>
+
+                  <p className="mt-0.5 text-[10px] text-slate-400">
+                    کارمند
+                  </p>
+                </div>
+
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-100 text-xs font-bold text-slate-700">
+                  {firstName?.[0] ||
+                    ""}
+                  {lastName?.[0] ||
+                    ""}
+                </div>
+              </div>
+            </div>
+          </header>
+
+          <main className="mx-auto max-w-3xl px-4 pb-28 pt-5 sm:px-6 sm:pb-10 sm:pt-8 lg:max-w-5xl lg:px-8 lg:pb-12 lg:pt-8">
+            {children}
+          </main>
+        </div>
+      </div>
+
+      {/* Mobile Bottom Navigation */}
+      <nav
+        dir="rtl"
+        aria-label="ناوبری موبایل پنل کارمند"
+        className="fixed inset-x-0 bottom-0 z-50 border-t border-slate-200/80 bg-white/95 px-2 pb-[max(10px,env(safe-area-inset-bottom))] pt-2 backdrop-blur-xl sm:hidden"
+      >
+        <div className="mx-auto grid max-w-md grid-cols-3 gap-1">
+          <MobileNavItem
+            href="/employee"
+            label="خانه"
+            icon={Home}
+            active={
+              pathname ===
+              "/employee"
+            }
+          />
+
+          <MobileNavItem
+            href="/employee/leave"
+            label="مرخصی"
+            icon={CalendarDays}
+            active={pathname.startsWith(
+              "/employee/leave",
+            )}
+          />
+
+          <LogoutButton mobile />
+        </div>
+      </nav>
+    </div>
+  );
+}
+
+function MobileNavItem({
+  href,
+  label,
+  icon: Icon,
+  active = false,
+}: {
+  href: string;
+  label: string;
+  icon: typeof Home;
+  active?: boolean;
+}) {
+  return (
+    <Link
+      href={href}
+      aria-current={
+        active
+          ? "page"
+          : undefined
+      }
+      className="flex min-w-0 flex-col items-center justify-center gap-1.5 py-1.5"
+    >
+      <div
+        className={`flex h-9 w-11 items-center justify-center rounded-2xl ${
+          active
+            ? "bg-slate-950 text-white"
+            : "text-slate-400"
+        }`}
+      >
+        <Icon size={18} />
+      </div>
+
+      <span
+        className={`text-[10px] font-semibold ${
+          active
+            ? "text-slate-950"
+            : "text-slate-400"
+        }`}
+      >
+        {label}
+      </span>
+    </Link>
+  );
+}
